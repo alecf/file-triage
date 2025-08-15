@@ -29,6 +29,49 @@ export class EmbeddingService {
   }
 
   /**
+   * Generate embeddings for multiple files
+   */
+  async getFileEmbeddings(
+    filePaths: string[],
+  ): Promise<
+    Array<{
+      filePath: string;
+      embedding: number[];
+      strategy: string;
+      error?: string;
+    }>
+  > {
+    const results: Array<{
+      filePath: string;
+      embedding: number[];
+      strategy: string;
+      error?: string;
+    }> = [];
+
+    for (const filePath of filePaths) {
+      try {
+        const result = await this.getFileEmbedding(filePath);
+        results.push({
+          filePath,
+          embedding: result.embedding,
+          strategy: result.strategy,
+        });
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        results.push({
+          filePath,
+          embedding: [],
+          strategy: "error",
+          error: errorMessage,
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
    * Generate an embedding for a file by extracting its content using appropriate strategies
    */
   async getFileEmbedding(
@@ -132,6 +175,8 @@ export class EmbeddingService {
     ext: string,
     stats: any,
   ): Promise<{ content: string; strategy: string }> {
+    const fileName = path.basename(filePath);
+
     // First, try to detect file type using the `file` command
     let detectedType = ext;
     try {
@@ -153,22 +198,10 @@ export class EmbeddingService {
       detectedType,
     );
 
-    // Debug logging
-    console.log(`Processing ${filePath} with ${strategies.length} strategies`);
-
     for (const strategy of strategies) {
       try {
-        console.log(`Trying strategy: ${strategy.name}`);
-
-        // Safety check for strategy name
-        if (!strategy.name || strategy.name.trim() === "") {
-          console.log(`Warning: Strategy has no name, skipping`);
-          continue;
-        }
-
         const result = await this.executeStrategy(strategy, filePath);
         if (result) {
-          console.log(`Strategy ${strategy.name} succeeded`);
           // Ensure strategy name is valid before returning
           const strategyName =
             strategy.name && strategy.name.trim() !== ""
@@ -180,14 +213,12 @@ export class EmbeddingService {
           };
         }
       } catch (error) {
-        console.log(`Strategy ${strategy.name} failed:`, error);
         // Continue to next strategy if this one fails
         continue;
       }
     }
 
     // Fallback to basic metadata
-    console.log(`All strategies failed, using fallback for ${filePath}`);
     return {
       content: `File: ${path.basename(
         filePath,
@@ -341,10 +372,6 @@ export class EmbeddingService {
       (strategy) => strategy && strategy.name && strategy.name.trim() !== "",
     );
 
-    console.log(
-      `Found ${strategies.length} strategies, ${validStrategies.length} are valid`,
-    );
-
     return validStrategies;
   }
 
@@ -436,7 +463,7 @@ export class EmbeddingService {
   }> {
     const ext = path.extname(filePath).toLowerCase();
     const stats = await fs.stat(filePath);
-
+    
     // Ensure tools are detected
     if (!this.toolDetectionDone) {
       await this.detectAvailableTools();
@@ -452,11 +479,7 @@ export class EmbeddingService {
     }
 
     // Get strategies
-    const strategies = await this.getStrategiesForFile(
-      filePath,
-      ext,
-      detectedType,
-    );
+    const strategies = await this.getStrategiesForFile(filePath, ext, detectedType);
 
     return {
       fileInfo: {
@@ -471,19 +494,59 @@ export class EmbeddingService {
         isOfficeFile: this.isOfficeFile(ext),
       },
       availableTools: Array.from(this.availableTools.keys()),
-      strategies: strategies.map((s) => ({
+      strategies: strategies.map(s => ({
         name: s.name,
         command: s.command,
-        description: s.description,
+        description: s.description
       })),
       detectedType,
       extension: ext,
     };
   }
 
-  private async detectAvailableTools(): Promise<void> {
-    console.log("Starting tool detection...");
+  /**
+   * Get a summary of the embedding process with statistics
+   */
+  async getProcessSummary(
+    results: Array<{
+      filePath: string;
+      embedding: number[];
+      strategy: string;
+      error?: string;
+    }>,
+  ): Promise<{
+    totalFiles: number;
+    successfulFiles: number;
+    failedFiles: number;
+    strategyBreakdown: Record<string, number>;
+    errorSummary: Record<string, number>;
+  }> {
+    const totalFiles = results.length;
+    const successfulFiles = results.filter((r) => !r.error).length;
+    const failedFiles = results.filter((r) => r.error).length;
 
+    const strategyBreakdown: Record<string, number> = {};
+    const errorSummary: Record<string, number> = {};
+
+    results.forEach((result) => {
+      if (result.error) {
+        errorSummary[result.error] = (errorSummary[result.error] || 0) + 1;
+      } else {
+        strategyBreakdown[result.strategy] =
+          (strategyBreakdown[result.strategy] || 0) + 1;
+      }
+    });
+
+    return {
+      totalFiles,
+      successfulFiles,
+      failedFiles,
+      strategyBreakdown,
+      errorSummary,
+    };
+  }
+
+  private async detectAvailableTools(): Promise<void> {
     const tools: ToolInfo[] = [
       {
         name: "pdfinfo",
@@ -591,17 +654,12 @@ export class EmbeddingService {
         // Use 'command -v' instead of 'which' for better compatibility
         await execAsync(`command -v ${tool.command}`);
         this.availableTools.set(tool.name, tool);
-        console.log(`✓ Detected tool: ${tool.name} (${tool.command})`);
         detectedCount++;
       } catch (error) {
-        console.log(`✗ Tool not available: ${tool.name} (${tool.command})`);
         // Tool not available
       }
     }
 
-    console.log(
-      `Tool detection complete. Found ${detectedCount} tools out of ${tools.length}`,
-    );
     this.toolDetectionDone = true;
   }
 

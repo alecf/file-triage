@@ -3,6 +3,7 @@
 import chalk from "chalk";
 import { program } from "commander";
 import { promises as fs } from "fs";
+import ora from "ora";
 import path from "path";
 import { EmbeddingCache } from "./cache.js";
 import { ClusteringService, FileItem } from "./clustering.js";
@@ -20,42 +21,61 @@ async function processDirectory(
 
   const files = await fs.readdir(dirPath);
   const fileItems: FileItem[] = [];
-
+  
+  // Filter out hidden files, directories, and empty files
+  const validFiles = [];
   for (const file of files) {
     if (file.startsWith(".")) continue; // Skip hidden files
-
+    
     const filePath = path.join(dirPath, file);
-
     try {
       const stats = await fs.stat(filePath);
-
       if (stats.isDirectory()) continue; // Skip directories
       if (stats.size === 0) continue; // Skip empty files
+      validFiles.push({ file, filePath, stats });
+    } catch (error) {
+      console.log(chalk.red(`Error checking ${file}: ${error}`));
+    }
+  }
 
-      console.log(chalk.gray(`Processing: ${file}`));
+  console.log(chalk.gray(`Found ${validFiles.length} valid files to process`));
 
+  if (validFiles.length === 0) {
+    return fileItems;
+  }
+
+  // Create progress spinner for file processing
+  const spinner = ora(`Processing files...`).start();
+  let processedCount = 0;
+  let cachedCount = 0;
+  let newEmbeddingCount = 0;
+  let errorCount = 0;
+
+  for (const { file, filePath, stats } of validFiles) {
+    spinner.text = `Processing ${file} (${processedCount + 1}/${validFiles.length})`;
+
+    try {
       // Try to get cached embedding
       let embedding = await cache.getCachedEmbedding(filePath);
       let strategy = "";
 
       if (!embedding) {
-        console.log(chalk.yellow(`  Getting embedding for ${file}`));
+        spinner.text = `Getting embedding for ${file}...`;
         try {
           const result = await embeddingService.getFileEmbedding(filePath);
           embedding = result.embedding;
           strategy = result.strategy;
           await cache.setCachedEmbedding(filePath, embedding, strategy);
-          console.log(
-            chalk.green(`  ✓ Cached embedding for ${file} (${strategy})`),
-          );
+          newEmbeddingCount++;
+          spinner.text = `✓ Cached embedding for ${file} (${strategy})`;
         } catch (error) {
-          console.log(
-            chalk.red(`  ✗ Failed to get embedding for ${file}: ${error}`),
-          );
+          errorCount++;
+          spinner.text = `✗ Failed to get embedding for ${file}: ${error}`;
           continue;
         }
       } else {
-        console.log(chalk.green(`  ✓ Using cached embedding for ${file}`));
+        cachedCount++;
+        spinner.text = `✓ Using cached embedding for ${file}`;
       }
 
       fileItems.push({
@@ -64,9 +84,19 @@ async function processDirectory(
         size: stats.size,
         lastModified: stats.mtime,
       });
+
+      processedCount++;
     } catch (error) {
-      console.log(chalk.red(`Error processing ${file}: ${error}`));
+      errorCount++;
+      spinner.text = `Error processing ${file}: ${error}`;
     }
+  }
+
+  // Show final results
+  if (errorCount === 0) {
+    spinner.succeed(`Processed ${processedCount} files (${cachedCount} cached, ${newEmbeddingCount} new)`);
+  } else {
+    spinner.warn(`Processed ${processedCount} files with ${errorCount} errors (${cachedCount} cached, ${newEmbeddingCount} new)`);
   }
 
   return fileItems;
@@ -83,6 +113,7 @@ async function main() {
       "OpenAI API key (or set OPENAI_API_KEY env var)",
     )
     .option("-c, --min-cluster-size <size>", "minimum cluster size", "2")
+    .option("--no-progress", "disable progress indicators")
     .action(async (directories: string[], options) => {
       try {
         // Validate OpenAI API key
@@ -111,6 +142,7 @@ async function main() {
 
         const embeddingService = new EmbeddingService(apiKey);
         const minClusterSize = parseInt(options.minClusterSize);
+        const showProgress = options.progress !== false;
 
         console.log(chalk.blue.bold("File Triage Tool"));
         console.log(
@@ -119,14 +151,25 @@ async function main() {
           ),
         );
 
-        // Process all directories
+        // Process all directories with progress
         const allFiles: FileItem[] = [];
-        for (const dir of directories) {
+        const overallSpinner = showProgress ? ora(`Processing directories...`).start() : null;
+        
+        for (let i = 0; i < directories.length; i++) {
+          const dir = directories[i];
+          if (showProgress) {
+            overallSpinner!.text = `Processing directory ${i + 1}/${directories.length}: ${path.basename(dir)}`;
+          }
+          
           const dirFiles = await processDirectory(
             path.resolve(dir),
             embeddingService,
           );
           allFiles.push(...dirFiles);
+        }
+
+        if (showProgress) {
+          overallSpinner!.succeed(`Completed processing ${directories.length} directories`);
         }
 
         console.log(chalk.green(`\nProcessed ${allFiles.length} files total`));
@@ -136,8 +179,10 @@ async function main() {
           return;
         }
 
-        // Cluster files
-        console.log(chalk.blue("\nClustering files..."));
+        // Cluster files with progress
+        if (showProgress) {
+          console.log(chalk.blue("\nClustering files..."));
+        }
         const clusters = await ClusteringService.clusterFiles(
           allFiles,
           minClusterSize,
