@@ -10,7 +10,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "debug": "ts-node src/debug-strategies.ts",
+    "example": "ts-node src/example-usage.ts"
   },
   "dependencies": {
     "hdbscan-ts": "^1.0.0",
@@ -26,7 +28,12 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3"
   },
-  "keywords": ["cli", "file-management", "embeddings", "clustering"],
+  "keywords": [
+    "cli",
+    "file-management",
+    "embeddings",
+    "clustering"
+  ],
   "author": "",
   "license": "MIT"
 }
