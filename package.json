@@ -1,0 +1,32 @@
+{
+  "name": "file-triage",
+  "version": "1.0.0",
+  "description": "CLI tool for triaging files using embeddings and clustering",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "file-triage": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "hdbscan-ts": "^1.0.0",
+    "commander": "^12.1.0",
+    "openai": "^4.67.3",
+    "xxhash-wasm": "^1.0.2",
+    "chalk": "^5.3.0",
+    "inquirer": "^10.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.9",
+    "@types/inquirer": "^9.0.7",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  },
+  "keywords": ["cli", "file-management", "embeddings", "clustering"],
+  "author": "",
+  "license": "MIT"
+}
