@@ -11,6 +11,8 @@ interface ToolInfo {
   command: string;
   args: string[];
   description: string;
+  validation?: (output: string) => boolean; // Optional validation function
+  priority?: number; // Optional priority (higher numbers = higher priority)
 }
 
 /**

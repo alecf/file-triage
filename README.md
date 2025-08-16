@@ -20,11 +20,13 @@ npm run build
 ## Usage
 
 Set your OpenAI API key:
+
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 ```
 
 Run the tool on one or more directories:
+
 ```bash
 npm start ~/Downloads ~/Documents
 # or
@@ -35,6 +37,11 @@ npm start ~/Downloads ~/Documents
 
 - `-k, --openai-key <key>`: OpenAI API key (alternative to environment variable)
 - `-c, --min-cluster-size <size>`: Minimum cluster size (default: 2)
+- `--similarity-threshold <threshold>`: Similarity threshold for preprocessing (0-1, default: 0.95)
+- `--max-cluster-size <size>`: Maximum files per cluster (default: 50)
+- `--auto-cluster`: Automatically adjust clustering parameters for optimal results
+- `--target-clusters <count>`: Target number of clusters for auto-clustering
+- `--verbose-clustering`: Show detailed auto-clustering information
 
 ### Interactive Commands
 
@@ -51,12 +58,43 @@ For each file in each cluster, you can:
 
 1. **File Scanning**: Scans all files in specified directories
 2. **Embedding Generation**: Creates embeddings for each file using OpenAI's API (cached for efficiency)
-3. **Clustering**: Groups similar files using HDBSCAN clustering algorithm
+3. **Clustering**: Groups similar files using HDBSCAN clustering algorithm with intelligent preprocessing
 4. **Interactive Triage**: Presents clusters one by one for manual review and action
+
+### Clustering Options
+
+#### **Manual Clustering**
+
+- **Similarity Threshold**: Control how similar files must be to group together (0.95 = very similar, 0.85 = more diverse)
+- **Max Cluster Size**: Limit the maximum number of files in any single cluster
+- **Min Cluster Size**: Prevent tiny clusters from forming
+
+#### **Auto-Clustering (Recommended)**
+
+Use `--auto-cluster` to automatically optimize clustering parameters:
+
+- Automatically detects and fixes giant clusters (>30% of dataset)
+- Adjusts parameters based on clustering quality
+- Re-clusters up to 3 times for optimal results
+- Provides detailed analysis and suggestions
+
+**Example:**
+
+```bash
+# Basic auto-clustering
+file-triage /path/to/files --auto-cluster
+
+# With target cluster count
+file-triage /path/to/files --auto-cluster --target-clusters 50
+
+# Verbose mode to see adjustments
+file-triage /path/to/files --auto-clustering --verbose-clustering
+```
 
 ## Cache Files
 
 The tool creates `.triage.json` files in each directory to cache embeddings. These files contain:
+
 - File hashes to detect changes
 - Generated embeddings
 - File metadata (size, modification time)

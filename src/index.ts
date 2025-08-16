@@ -6,7 +6,12 @@ import { promises as fs } from "fs";
 import ora from "ora";
 import path from "path";
 import { EmbeddingCache } from "./cache.js";
-import { clusterFiles, FileItem } from "./clustering.js";
+import {
+  analyzeClusteringResults,
+  autoClusterFiles,
+  clusterFiles,
+  FileItem,
+} from "./clustering.js";
 import { EmbeddingService } from "./embeddings.js";
 import { triageClusters } from "./interactive.js";
 
@@ -127,6 +132,25 @@ async function main() {
       "OpenAI API key (or set OPENAI_API_KEY env var)",
     )
     .option("-c, --min-cluster-size <size>", "minimum cluster size", "2")
+    .option(
+      "--similarity-threshold <threshold>",
+      "similarity threshold for clustering (0-1)",
+      "0.95",
+    )
+    .option("--max-cluster-size <size>", "maximum files per cluster", "50")
+    .option(
+      "--auto-cluster",
+      "automatically adjust clustering parameters for optimal results",
+    )
+    .option(
+      "--target-clusters <count>",
+      "target number of clusters for auto-clustering",
+    )
+    .option("--verbose-clustering", "show detailed auto-clustering information")
+    .option(
+      "--ultra-strict",
+      "use ultra-strict clustering (max 5% per cluster, max 20 files per cluster)",
+    )
     .option("--no-progress", "disable progress indicators")
     .option(
       "--fast-cache",
@@ -160,13 +184,47 @@ async function main() {
 
         const embeddingService = new EmbeddingService(apiKey);
         const minClusterSize = parseInt(options.minClusterSize);
+        const similarityThreshold = parseFloat(
+          options.similarityThreshold || "0.95",
+        );
+        const maxClusterSize = parseInt(options.maxClusterSize || "50");
+        const enableAutoCluster = options.autoCluster === true;
+        const targetClusters = options.targetClusters
+          ? parseInt(options.targetClusters)
+          : undefined;
+        const verboseClustering = options.verboseClustering === true;
+        const ultraStrict = options.ultraStrict === true;
         const showProgress = options.progress !== false;
         const useFastCache = options.fastCache === true;
 
+        // Apply ultra-strict settings if enabled
+        if (ultraStrict) {
+          console.log(
+            chalk.yellow(
+              "🔒 Ultra-strict clustering enabled - will enforce very small cluster sizes",
+            ),
+          );
+        }
+
+        const effectiveMaxClusterSize = ultraStrict ? 20 : maxClusterSize;
         console.log(chalk.blue.bold("File Triage Tool"));
         console.log(
           chalk.gray(
-            `Processing ${directories.length} directories with minimum cluster size of ${minClusterSize}\n`,
+            `Processing ${directories.length} directories with clustering parameters:\n` +
+              `  - Minimum cluster size: ${minClusterSize}\n` +
+              `  - Similarity threshold: ${similarityThreshold}\n` +
+              `  - Maximum cluster size: ${effectiveMaxClusterSize}${
+                ultraStrict ? " (ultra-strict)" : ""
+              }\n` +
+              `  - Auto-clustering: ${
+                enableAutoCluster ? "enabled" : "disabled"
+              }\n` +
+              (targetClusters
+                ? `  - Target clusters: ${targetClusters}\n`
+                : "") +
+              `  - Verbose clustering: ${
+                verboseClustering ? "enabled" : "disabled"
+              }\n`,
           ),
         );
 
@@ -217,8 +275,79 @@ async function main() {
         if (showProgress) {
           console.log(chalk.blue("\nClustering files..."));
         }
-        const clusters = await clusterFiles(allFiles, minClusterSize);
+
+        let clusters;
+        if (enableAutoCluster) {
+          // Use auto-clustering with parameter adjustment
+          if (showProgress) {
+            console.log(
+              chalk.blue(
+                "🔄 Auto-clustering enabled - will adjust parameters automatically",
+              ),
+            );
+          }
+
+          const autoResult = await autoClusterFiles(
+            allFiles,
+            {
+              minClusterSize,
+              similarityThreshold,
+              maxClusterSize: ultraStrict ? 20 : maxClusterSize,
+            },
+            {
+              targetClusterCount: targetClusters,
+              enableVerbose: verboseClustering,
+              maxClusterSizePercent: ultraStrict ? 0.05 : 0.1, // 5% for ultra-strict, 10% for normal
+            },
+          );
+
+          clusters = autoResult.clusters;
+
+          // Show auto-clustering results
+          console.log(
+            chalk.green(
+              `✅ Auto-clustering completed in ${autoResult.iterations} iteration(s)`,
+            ),
+          );
+          console.log(
+            chalk.blue(`📊 Final parameters:`, autoResult.finalOptions),
+          );
+
+          if (autoResult.adjustments.length > 0) {
+            console.log(chalk.yellow("\n🔧 Parameter adjustments made:"));
+            autoResult.adjustments.forEach((adjustment) => {
+              console.log(chalk.yellow(`  • ${adjustment}`));
+            });
+          }
+        } else {
+          // Use manual clustering
+          clusters = await clusterFiles(allFiles, {
+            minClusterSize,
+            similarityThreshold,
+            maxClusterSize: ultraStrict ? 20 : maxClusterSize,
+          });
+        }
+
         console.log(chalk.green(`Created ${clusters.length} clusters`));
+
+        // Analyze clustering results and provide suggestions
+        const analysis = analyzeClusteringResults(clusters);
+        console.log(chalk.blue("\n📊 Clustering Analysis:"));
+        console.log(chalk.gray(`Total files: ${analysis.totalFiles}`));
+        console.log(chalk.gray(`Total clusters: ${analysis.totalClusters}`));
+        console.log(chalk.gray(`Size distribution:`));
+        Object.entries(analysis.sizeDistribution).forEach(([range, count]) => {
+          if (count > 0) {
+            console.log(chalk.gray(`  ${range}: ${count} clusters`));
+          }
+        });
+
+        if (analysis.suggestions.length > 0) {
+          console.log(chalk.yellow("\n💡 Suggestions for better clustering:"));
+          analysis.suggestions.forEach((suggestion) => {
+            console.log(chalk.yellow(`  • ${suggestion}`));
+          });
+        }
 
         // Interactive triage
         await triageClusters(clusters);

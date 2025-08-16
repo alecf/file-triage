@@ -73,16 +73,24 @@ File Triage processes directories of files by:
 ### 4. **Clustering Service (`src/clustering.ts`)**
 
 - **HDBSCAN algorithm** for density-based clustering
-- **Dimensionality reduction** for large embedding sets
-- **Configurable cluster sizes** via `--min-cluster-size`
-- **Similarity-based grouping** of semantically related files
+- **Intelligent preprocessing** to reduce clustering lumpiness
+- **Configurable cluster parameters** via command-line options
+- **Auto-clustering** with parameter optimization
+- **Quality scoring** and automatic stopping
 
 **Clustering Process:**
 
-1. Normalize embeddings to unit vectors
-2. Apply HDBSCAN with configurable parameters
-3. Group files by cluster membership
-4. Provide cluster statistics and file lists
+1. **HDBSCAN**: Apply clustering algorithm with optimized parameters
+2. **Analysis**: Evaluate clustering quality and identify issues
+3. **Auto-adjustment**: Automatically refine parameters and re-cluster
+4. **Results**: Provide optimized clusters with detailed analysis
+
+**Key Features:**
+
+- **Similarity Threshold Control**: Adjust how similar files must be to group together
+- **Max Cluster Size Limiting**: Prevent any single cluster from dominating the dataset
+- **Quality-Based Stopping**: Stop auto-clustering when quality score >0.8
+- **Smart Parameter Adjustment**: Apply best practices automatically based on results
 
 ### 5. **Interactive Interface (`src/interactive.ts`)**
 
@@ -132,10 +140,11 @@ Directories → File Discovery → Content Extraction → Embedding Generation �
 
 ### Phase 4: Clustering
 
-- Normalize all embeddings
-- Apply HDBSCAN clustering algorithm
-- Group files by similarity
-- Provide cluster statistics
+- **Parameter Optimization**: Auto-adjust clustering parameters based on results
+- **HDBSCAN Algorithm**: Apply density-based clustering with optimized settings
+- **Quality Evaluation**: Score clustering results and identify improvements
+- **Iterative Refinement**: Re-cluster up to 3 times for optimal results
+- **Final Analysis**: Provide detailed cluster statistics and suggestions
 
 ### Phase 5: Interactive Triage
 
@@ -155,6 +164,11 @@ file-triage <directories...> [options]
 
 - `-k, --openai-key <key>`: OpenAI API key
 - `-c, --min-cluster-size <size>`: Minimum cluster size (default: 2)
+- `--similarity-threshold <threshold>`: Similarity threshold for clustering (0-1, default: 0.95)
+- `--max-cluster-size <size>`: Maximum files per cluster (default: 50)
+- `--auto-cluster`: Automatically adjust clustering parameters for optimal results
+- `--target-clusters <count>`: Target number of clusters for auto-clustering
+- `--verbose-clustering`: Show detailed auto-clustering information
 - `--no-progress`: Disable progress indicators
 - `--fast-cache`: Use fast cache validation (faster but less reliable)
 
@@ -169,6 +183,15 @@ file-triage ./documents ./images ./downloads
 
 # Custom cluster size
 file-triage -c 3 ./documents
+
+# Auto-clustering (recommended for large datasets)
+file-triage --auto-cluster ./documents
+
+# Auto-clustering with target cluster count
+file-triage --auto-cluster --target-clusters 50 ./documents
+
+# Manual clustering with custom parameters
+file-triage --similarity-threshold 0.90 --max-cluster-size 25 ./documents
 
 # Disable progress indicators
 file-triage --no-progress ./documents
@@ -275,9 +298,12 @@ embeddingService.registerCustomTool({
 
 ### Clustering Parameters
 
-- Adjust `min-cluster-size` for different granularity
-- Modify HDBSCAN parameters for clustering behavior
-- Implement custom similarity metrics
+- **Basic Parameters**: Adjust `min-cluster-size`, `similarity-threshold`, and `max-cluster-size`
+- **Auto-Clustering**: Let the system automatically optimize parameters based on results
+- **Quality Scoring**: System evaluates clustering quality and stops when optimal
+- **Preprocessing**: Automatic filtering of very similar files to prevent giant clusters
+- **HDBSCAN Tuning**: Modify algorithm parameters for different clustering behaviors
+- **Custom Similarity**: Implement custom similarity metrics beyond cosine similarity
 
 ## Use Cases
 
@@ -295,3 +321,36 @@ embeddingService.registerCustomTool({
 4. **Performance optimization**: Caching, timeouts, and efficient algorithms
 5. **Extensibility**: Easy addition of new file types and tools
 6. **Error resilience**: Continue processing despite individual failures
+7. **Intelligent automation**: Auto-optimization of complex parameters
+8. **Quality-driven decisions**: Data-driven parameter adjustment
+
+## Auto-Clustering Rules
+
+The auto-clustering system applies intelligent rules to optimize clustering parameters:
+
+### **Rule 1: Giant Cluster Detection**
+
+- **Trigger**: Any cluster >30% of total files
+- **Action**: Reduce `max-cluster-size` by 30-50%
+- **Action**: Reduce `similarity-threshold` by 0.05-0.10
+
+### **Rule 2: Small Cluster Detection**
+
+- **Trigger**: >70% of clusters have <10 files AND >30 total clusters
+- **Action**: Increase `min-cluster-size` by 1
+
+### **Rule 3: Target Cluster Adjustment**
+
+- **Trigger**: User specified `--target-clusters`
+- **Action**: Adjust `similarity-threshold` based on current vs. target ratio
+
+### **Rule 4: Quality Threshold**
+
+- **Trigger**: Clustering quality score >0.8
+- **Action**: Stop auto-clustering (good enough)
+
+### **Quality Scoring System**
+
+- **Size Distribution Balance** (40%): How well clusters are distributed across size ranges
+- **Giant Cluster Penalty** (30%): Penalty for clusters >30% of dataset
+- **Target Cluster Match** (30%): How close to desired cluster count
