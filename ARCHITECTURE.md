@@ -148,6 +148,7 @@ file-triage <directories...> [options]
 - `-k, --openai-key <key>`: OpenAI API key
 - `-c, --min-cluster-size <size>`: Minimum cluster size (default: 2)
 - `--no-progress`: Disable progress indicators
+- `--fast-cache`: Use fast cache validation (faster but less reliable)
 
 ### Examples
 
@@ -163,6 +164,9 @@ file-triage -c 3 ./documents
 
 # Disable progress indicators
 file-triage --no-progress ./documents
+
+# Use fast cache mode for maximum performance
+file-triage --fast-cache ./documents
 ```
 
 ## Progress Indicators
@@ -203,6 +207,23 @@ Getting embedding for document.pdf...
 - **Large file skipping** (>10MB) with basic metadata
 - **Efficient caching** reduces API calls
 - **Progress indicators** can be disabled for maximum performance
+
+### Cache Performance Optimizations
+
+The caching system includes several performance optimizations:
+
+- **Batch validation**: Multiple cache entries are validated simultaneously to reduce I/O operations
+- **Lazy validation**: Cache entries are only validated when first accessed
+- **Smart hashing**: Small files (<1MB) use fast in-memory hashing, large files use streaming
+- **Fast mode**: Optional `--fast-cache` flag uses stat-based validation only (faster but less reliable)
+- **Validation caching**: Once validated, cache entries are marked to avoid repeated checks
+- **Stale cleanup**: Automatic removal of invalid cache entries to prevent bloat
+
+### Performance Modes
+
+- **Accurate mode** (default): Full file hash validation for reliability
+- **Fast mode** (`--fast-cache`): Stat-based validation only for maximum speed
+- **Hybrid approach**: Small files use fast validation, large files use hash validation when needed
 
 ## Dependencies
 

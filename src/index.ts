@@ -13,20 +13,21 @@ import { InteractiveTriager } from "./interactive.js";
 async function processDirectory(
   dirPath: string,
   embeddingService: EmbeddingService,
+  useFastCache: boolean,
 ): Promise<FileItem[]> {
   console.log(chalk.blue(`Processing directory: ${dirPath}`));
 
-  const cache = new EmbeddingCache(dirPath);
+  const cache = new EmbeddingCache(dirPath, useFastCache);
   await cache.initialize();
 
   const files = await fs.readdir(dirPath);
   const fileItems: FileItem[] = [];
-  
+
   // Filter out hidden files, directories, and empty files
   const validFiles = [];
   for (const file of files) {
     if (file.startsWith(".")) continue; // Skip hidden files
-    
+
     const filePath = path.join(dirPath, file);
     try {
       const stats = await fs.stat(filePath);
@@ -44,6 +45,10 @@ async function processDirectory(
     return fileItems;
   }
 
+  // Batch get all cached embeddings first
+  const filePaths = validFiles.map((f) => f.filePath);
+  const cachedEmbeddings = await cache.getCachedEmbeddings(filePaths);
+
   // Create progress spinner for file processing
   const spinner = ora(`Processing files...`).start();
   let processedCount = 0;
@@ -52,11 +57,13 @@ async function processDirectory(
   let errorCount = 0;
 
   for (const { file, filePath, stats } of validFiles) {
-    spinner.text = `Processing ${file} (${processedCount + 1}/${validFiles.length})`;
+    spinner.text = `Processing ${file} (${processedCount + 1}/${
+      validFiles.length
+    })`;
 
     try {
-      // Try to get cached embedding
-      let embedding = await cache.getCachedEmbedding(filePath);
+      // Check if we have a cached embedding
+      let embedding = cachedEmbeddings.get(filePath);
       let strategy = "";
 
       if (!embedding) {
@@ -92,11 +99,18 @@ async function processDirectory(
     }
   }
 
+  // Clean up stale cache entries
+  await cache.cleanupStaleEntries();
+
   // Show final results
   if (errorCount === 0) {
-    spinner.succeed(`Processed ${processedCount} files (${cachedCount} cached, ${newEmbeddingCount} new)`);
+    spinner.succeed(
+      `Processed ${processedCount} files (${cachedCount} cached, ${newEmbeddingCount} new)`,
+    );
   } else {
-    spinner.warn(`Processed ${processedCount} files with ${errorCount} errors (${cachedCount} cached, ${newEmbeddingCount} new)`);
+    spinner.warn(
+      `Processed ${processedCount} files with ${errorCount} errors (${cachedCount} cached, ${newEmbeddingCount} new)`,
+    );
   }
 
   return fileItems;
@@ -114,6 +128,10 @@ async function main() {
     )
     .option("-c, --min-cluster-size <size>", "minimum cluster size", "2")
     .option("--no-progress", "disable progress indicators")
+    .option(
+      "--fast-cache",
+      "use fast cache validation (faster but less reliable)",
+    )
     .action(async (directories: string[], options) => {
       try {
         // Validate OpenAI API key
@@ -143,6 +161,7 @@ async function main() {
         const embeddingService = new EmbeddingService(apiKey);
         const minClusterSize = parseInt(options.minClusterSize);
         const showProgress = options.progress !== false;
+        const useFastCache = options.fastCache === true;
 
         console.log(chalk.blue.bold("File Triage Tool"));
         console.log(
@@ -151,25 +170,40 @@ async function main() {
           ),
         );
 
+        if (useFastCache) {
+          console.log(
+            chalk.yellow(
+              "⚠️  Fast cache mode enabled - cache validation uses file stats only (faster but less reliable)",
+            ),
+          );
+        }
+
         // Process all directories with progress
         const allFiles: FileItem[] = [];
-        const overallSpinner = showProgress ? ora(`Processing directories...`).start() : null;
-        
+        const overallSpinner = showProgress
+          ? ora(`Processing directories...`).start()
+          : null;
+
         for (let i = 0; i < directories.length; i++) {
           const dir = directories[i];
           if (showProgress) {
-            overallSpinner!.text = `Processing directory ${i + 1}/${directories.length}: ${path.basename(dir)}`;
+            overallSpinner!.text = `Processing directory ${i + 1}/${
+              directories.length
+            }: ${path.basename(dir)}`;
           }
-          
+
           const dirFiles = await processDirectory(
             path.resolve(dir),
             embeddingService,
+            useFastCache,
           );
           allFiles.push(...dirFiles);
         }
 
         if (showProgress) {
-          overallSpinner!.succeed(`Completed processing ${directories.length} directories`);
+          overallSpinner!.succeed(
+            `Completed processing ${directories.length} directories`,
+          );
         }
 
         console.log(chalk.green(`\nProcessed ${allFiles.length} files total`));
