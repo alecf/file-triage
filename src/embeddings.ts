@@ -31,9 +31,7 @@ export class EmbeddingService {
   /**
    * Generate embeddings for multiple files
    */
-  async getFileEmbeddings(
-    filePaths: string[],
-  ): Promise<
+  async getFileEmbeddings(filePaths: string[]): Promise<
     Array<{
       filePath: string;
       embedding: number[];
@@ -463,7 +461,7 @@ export class EmbeddingService {
   }> {
     const ext = path.extname(filePath).toLowerCase();
     const stats = await fs.stat(filePath);
-    
+
     // Ensure tools are detected
     if (!this.toolDetectionDone) {
       await this.detectAvailableTools();
@@ -479,7 +477,11 @@ export class EmbeddingService {
     }
 
     // Get strategies
-    const strategies = await this.getStrategiesForFile(filePath, ext, detectedType);
+    const strategies = await this.getStrategiesForFile(
+      filePath,
+      ext,
+      detectedType,
+    );
 
     return {
       fileInfo: {
@@ -494,10 +496,10 @@ export class EmbeddingService {
         isOfficeFile: this.isOfficeFile(ext),
       },
       availableTools: Array.from(this.availableTools.keys()),
-      strategies: strategies.map(s => ({
+      strategies: strategies.map((s) => ({
         name: s.name,
         command: s.command,
-        description: s.description
+        description: s.description,
       })),
       detectedType,
       extension: ext,

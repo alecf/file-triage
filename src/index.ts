@@ -6,9 +6,9 @@ import { promises as fs } from "fs";
 import ora from "ora";
 import path from "path";
 import { EmbeddingCache } from "./cache.js";
-import { ClusteringService, FileItem } from "./clustering.js";
+import { clusterFiles, FileItem } from "./clustering.js";
 import { EmbeddingService } from "./embeddings.js";
-import { InteractiveTriager } from "./interactive.js";
+import { triageClusters } from "./interactive.js";
 
 async function processDirectory(
   dirPath: string,
@@ -217,15 +217,11 @@ async function main() {
         if (showProgress) {
           console.log(chalk.blue("\nClustering files..."));
         }
-        const clusters = await ClusteringService.clusterFiles(
-          allFiles,
-          minClusterSize,
-        );
+        const clusters = await clusterFiles(allFiles, minClusterSize);
         console.log(chalk.green(`Created ${clusters.length} clusters`));
 
         // Interactive triage
-        const triager = new InteractiveTriager();
-        await triager.triageClusters(clusters);
+        await triageClusters(clusters);
       } catch (error) {
         console.error(chalk.red("Error:"), error);
         process.exit(1);

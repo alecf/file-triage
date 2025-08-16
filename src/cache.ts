@@ -1,6 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { FileHasher } from "./hasher.js";
+import { hashFile } from "./hasher.js";
 
 export interface CacheEntry {
   hash: string;
@@ -106,7 +106,7 @@ export class EmbeddingCache {
               // Large files: verify hash (but only if we have one)
               if (entry.hash) {
                 try {
-                  const currentHash = await FileHasher.hashFile(filePath);
+                  const currentHash = await hashFile(filePath);
                   if (entry.hash === currentHash) {
                     entry.isValidated = true;
                     entry.isStale = false;
@@ -189,7 +189,7 @@ export class EmbeddingCache {
               // Large files: verify hash
               if (entry.hash) {
                 try {
-                  const currentHash = await FileHasher.hashFile(filePath);
+                  const currentHash = await hashFile(filePath);
                   if (entry.hash === currentHash) {
                     entry.isValidated = true;
                     entry.isStale = false;
@@ -262,7 +262,7 @@ export class EmbeddingCache {
 
     try {
       const stats = await fs.stat(filePath);
-      const hash = await FileHasher.hashFile(filePath);
+      const hash = await hashFile(filePath);
 
       this.cache[fileName] = {
         hash,

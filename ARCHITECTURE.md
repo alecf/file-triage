@@ -84,12 +84,20 @@ File Triage processes directories of files by:
 3. Group files by cluster membership
 4. Provide cluster statistics and file lists
 
-### 5. **Interactive Interface (`src/interactive.js`)**
+### 5. **Interactive Interface (`src/interactive.ts`)**
 
 - **Terminal-based UI** for cluster exploration
 - **File preview** and navigation
 - **Cluster management** (rename, merge, split)
 - **Export capabilities** for organized results
+
+**Key Functions:**
+
+- `triageClusters()` - Main entry point for interactive triage
+- `triageCluster()` - Process a single cluster
+- `triageFile()` - Handle individual file actions
+- `displayClusterSummary()` - Show cluster status
+- `displayStatusSummary()` - Show overall progress
 
 ## Data Flow
 
