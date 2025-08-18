@@ -3,6 +3,7 @@ import { promises as fs } from "fs";
 import OpenAI from "openai";
 import path from "path";
 import { promisify } from "util";
+import { generateFileInfoText } from "./fileinfo.js";
 
 const execAsync = promisify(exec);
 
@@ -74,13 +75,20 @@ export class EmbeddingService {
   }
 
   /**
-   * Generate an embedding for a file by extracting its content using appropriate strategies
+   * Generate an embedding for a file by extracting its content using the unified file info system
    */
   async getFileEmbedding(
     filePath: string,
   ): Promise<{ embedding: number[]; strategy: string }> {
     try {
-      const { content, strategy } = await this.extractTextContent(filePath);
+      // Use the unified file info system to get canonical content
+      const content = await generateFileInfoText(filePath);
+
+      // Get the strategy from the file info (we'll extract it from the content)
+      const fileInfo = await import("./fileinfo.js").then((m) =>
+        m.generateFileInfo(filePath),
+      );
+
       const response = await this.openai.embeddings.create({
         model: "text-embedding-3-small",
         input: content,
@@ -89,7 +97,7 @@ export class EmbeddingService {
 
       return {
         embedding: response.data[0].embedding,
-        strategy,
+        strategy: fileInfo.strategy,
       };
     } catch (error) {
       console.error(`Error getting embedding for ${filePath}:`, error);
@@ -218,312 +226,6 @@ export class EmbeddingService {
 
       default:
         return "Unknown tool validation failure";
-    }
-  }
-
-  private async extractTextContent(
-    filePath: string,
-  ): Promise<{ content: string; strategy: string }> {
-    const ext = path.extname(filePath).toLowerCase();
-    const stats = await fs.stat(filePath);
-
-    // Skip very large files (>10MB)
-    if (stats.size > 10 * 1024 * 1024) {
-      return {
-        content: `Large file: ${path.basename(filePath)} (${this.formatFileSize(
-          stats.size,
-        )})`,
-        strategy: "text-large",
-      };
-    }
-
-    try {
-      // For text-based files, read content directly
-      if (this.isTextFile(ext)) {
-        const content = await fs.readFile(filePath, "utf-8");
-        // Truncate very long content to avoid token limits
-        const isTruncated = content.length > 8000;
-        const truncatedContent = isTruncated
-          ? content.substring(0, 8000) + "..."
-          : content;
-        return {
-          content: truncatedContent,
-          strategy: isTruncated ? "text-truncated" : "text",
-        };
-      }
-
-      // For non-text files, try to extract meaningful content
-      return await this.extractNonTextContent(filePath, ext, stats);
-    } catch (error) {
-      return {
-        content: `File: ${path.basename(
-          filePath,
-        )}, Extension: ${ext}, Size: ${this.formatFileSize(
-          stats.size,
-        )} (unreadable)`,
-        strategy: "metadata-unreadable",
-      };
-    }
-  }
-
-  private async extractNonTextContent(
-    filePath: string,
-    ext: string,
-    stats: any,
-  ): Promise<{ content: string; strategy: string }> {
-    const fileName = path.basename(filePath);
-
-    // First, try to detect file type using the `file` command
-    let detectedType = ext;
-    try {
-      const { stdout } = await execAsync(`file "${filePath}"`);
-      detectedType = stdout.toLowerCase();
-    } catch (error) {
-      // If `file` command fails, fall back to extension
-    }
-
-    // Ensure tools are detected
-    if (!this.toolDetectionDone) {
-      await this.detectAvailableTools();
-    }
-
-    // Try different strategies based on file type
-    const strategies = await this.getStrategiesForFile(
-      filePath,
-      ext,
-      detectedType,
-    );
-
-    for (const strategy of strategies) {
-      try {
-        const result = await this.executeStrategy(strategy, filePath);
-        if (result) {
-          // Ensure strategy name is valid before returning
-          const strategyName =
-            strategy.name && strategy.name.trim() !== ""
-              ? strategy.name
-              : "strategy-executed";
-          return {
-            content: result,
-            strategy: strategyName,
-          };
-        }
-      } catch (error) {
-        // Continue to next strategy if this one fails
-        continue;
-      }
-    }
-
-    // Fallback to basic metadata
-    return {
-      content: `File: ${path.basename(
-        filePath,
-      )}, Extension: ${ext}, Type: ${detectedType}, Size: ${this.formatFileSize(
-        stats.size,
-      )}`,
-      strategy: "metadata-basic",
-    };
-  }
-
-  private async getStrategiesForFile(
-    filePath: string,
-    ext: string,
-    detectedType: string,
-  ): Promise<ToolInfo[]> {
-    const strategies: ToolInfo[] = [];
-
-    // PDF strategies
-    if (ext === ".pdf" || detectedType.includes("pdf")) {
-      if (this.availableTools.has("pdfinfo")) {
-        const tool = this.availableTools.get("pdfinfo")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("pdftotext")) {
-        const tool = this.availableTools.get("pdftotext")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Image strategies
-    if (this.isImageFile(ext) || detectedType.includes("image")) {
-      if (this.availableTools.has("identify")) {
-        const tool = this.availableTools.get("identify")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("gm-identify")) {
-        const tool = this.availableTools.get("gm-identify")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Document strategies
-    if (
-      ext === ".doc" ||
-      ext === ".docx" ||
-      detectedType.includes("microsoft word")
-    ) {
-      if (this.availableTools.has("antiword")) {
-        const tool = this.availableTools.get("antiword")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("catdoc")) {
-        const tool = this.availableTools.get("catdoc")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Spreadsheet strategies
-    if (ext === ".xlsx" || ext === ".xls" || detectedType.includes("excel")) {
-      if (this.availableTools.has("xlsx2csv")) {
-        const tool = this.availableTools.get("xlsx2csv")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Archive strategies
-    if (ext === ".zip" || detectedType.includes("zip")) {
-      if (this.availableTools.has("unzip")) {
-        const tool = this.availableTools.get("unzip")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    if (
-      ext === ".tar" ||
-      ext === ".tar.gz" ||
-      ext === ".tgz" ||
-      detectedType.includes("tar")
-    ) {
-      if (this.availableTools.has("tar")) {
-        const tool = this.availableTools.get("tar")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Media strategies
-    if (
-      this.isAudioFile(ext) ||
-      this.isVideoFile(ext) ||
-      detectedType.includes("video") ||
-      detectedType.includes("audio")
-    ) {
-      if (this.availableTools.has("ffprobe")) {
-        const tool = this.availableTools.get("ffprobe")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Generic metadata extraction
-    if (this.availableTools.has("exiftool")) {
-      const tool = this.availableTools.get("exiftool")!;
-      if (tool && tool.name && tool.name.trim() !== "") {
-        strategies.push(tool);
-      }
-    }
-
-    // Binary file analysis
-    if (this.availableTools.has("strings")) {
-      const tool = this.availableTools.get("strings")!;
-      if (tool && tool.name && tool.name.trim() !== "") {
-        strategies.push(tool);
-      }
-    }
-
-    // Fallback strategies for binary files
-    if (this.availableTools.has("hexdump")) {
-      const tool = this.availableTools.get("hexdump")!;
-      if (tool && tool.name && tool.name.trim() !== "") {
-        strategies.push(tool);
-      }
-    }
-
-    if (this.availableTools.has("od")) {
-      const tool = this.availableTools.get("od")!;
-      if (tool && tool.name && tool.name.trim() !== "") {
-        strategies.push(tool);
-      }
-    }
-
-    // Sort strategies by priority (higher numbers = higher priority)
-    strategies.sort((a, b) => (b.priority || 1) - (a.priority || 1));
-
-    return strategies;
-  }
-
-  private async executeStrategy(
-    strategy: ToolInfo,
-    filePath: string,
-  ): Promise<string | null> {
-    try {
-      const args = strategy.args.map((arg) =>
-        arg === "FILEPATH" ? `"${filePath}"` : arg,
-      );
-      const command = `${strategy.command} ${args.join(" ")}`;
-
-      const { stdout, stderr } = await execAsync(command, {
-        timeout: 10000,
-        maxBuffer: 1024 * 1024, // 1MB buffer
-      });
-
-      if (stdout && stdout.trim()) {
-        // Truncate very long output to avoid token limits
-        const output = stdout.trim();
-        const isTruncated = output.length > 6000;
-        const truncatedOutput = isTruncated
-          ? output.substring(0, 6000) + "..."
-          : output;
-
-        // Apply validation if the tool has a validation function
-        if (strategy.validation && !strategy.validation(truncatedOutput)) {
-          if (this.verboseToolLogging) {
-            const failureReason = this.getValidationFailureReason(
-              strategy.name,
-              truncatedOutput,
-            );
-            console.log(
-              `⚠️  Tool ${strategy.name} validation failed for ${path.basename(
-                filePath,
-              )}: ${failureReason}`,
-            );
-          }
-          return null; // Validation failed
-        }
-
-        // Log successful tool execution if verbose mode is enabled
-        if (this.verboseToolLogging) {
-          console.log(
-            `✅ Tool ${strategy.name} succeeded for ${path.basename(
-              filePath,
-            )} (${truncatedOutput.length} characters)`,
-          );
-        }
-
-        return `${strategy.description}:\n${truncatedOutput}`;
-      }
-
-      return null;
-    } catch (error) {
-      return null;
     }
   }
 
@@ -847,6 +549,208 @@ export class EmbeddingService {
     }
 
     this.toolDetectionDone = true;
+  }
+
+  private async getStrategiesForFile(
+    filePath: string,
+    ext: string,
+    detectedType: string,
+  ): Promise<ToolInfo[]> {
+    const strategies: ToolInfo[] = [];
+
+    // PDF strategies
+    if (ext === ".pdf" || detectedType.includes("pdf")) {
+      if (this.availableTools.has("pdfinfo")) {
+        const tool = this.availableTools.get("pdfinfo")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+      if (this.availableTools.has("pdftotext")) {
+        const tool = this.availableTools.get("pdftotext")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Image strategies
+    if (this.isImageFile(ext) || detectedType.includes("image")) {
+      if (this.availableTools.has("identify")) {
+        const tool = this.availableTools.get("identify")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+      if (this.availableTools.has("gm-identify")) {
+        const tool = this.availableTools.get("gm-identify")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Document strategies
+    if (
+      ext === ".doc" ||
+      ext === ".docx" ||
+      detectedType.includes("microsoft word")
+    ) {
+      if (this.availableTools.has("antiword")) {
+        const tool = this.availableTools.get("antiword")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+      if (this.availableTools.has("catdoc")) {
+        const tool = this.availableTools.get("catdoc")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Spreadsheet strategies
+    if (ext === ".xlsx" || ext === ".xls" || detectedType.includes("excel")) {
+      if (this.availableTools.has("xlsx2csv")) {
+        const tool = this.availableTools.get("xlsx2csv")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Archive strategies
+    if (ext === ".zip" || detectedType.includes("zip")) {
+      if (this.availableTools.has("unzip")) {
+        const tool = this.availableTools.get("unzip")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    if (
+      ext === ".tar" ||
+      ext === ".tar.gz" ||
+      ext === ".tgz" ||
+      detectedType.includes("tar")
+    ) {
+      if (this.availableTools.has("tar")) {
+        const tool = this.availableTools.get("tar")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Media strategies
+    if (
+      this.isAudioFile(ext) ||
+      this.isVideoFile(ext) ||
+      detectedType.includes("video") ||
+      detectedType.includes("audio")
+    ) {
+      if (this.availableTools.has("ffprobe")) {
+        const tool = this.availableTools.get("ffprobe")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Generic metadata extraction
+    if (this.availableTools.has("exiftool")) {
+      const tool = this.availableTools.get("exiftool")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Binary file analysis
+    if (this.availableTools.has("strings")) {
+      const tool = this.availableTools.get("strings")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Fallback strategies for binary files
+    if (this.availableTools.has("hexdump")) {
+      const tool = this.availableTools.get("hexdump")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    if (this.availableTools.has("od")) {
+      const tool = this.availableTools.get("od")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Sort strategies by priority (higher numbers = higher priority)
+    strategies.sort((a, b) => (b.priority || 1) - (a.priority || 1));
+
+    return strategies;
+  }
+
+  private async executeStrategy(
+    strategy: ToolInfo,
+    filePath: string,
+  ): Promise<string | null> {
+    try {
+      const args = strategy.args.map((arg) =>
+        arg === "FILEPATH" ? `"${filePath}"` : arg,
+      );
+      const command = `${strategy.command} ${args.join(" ")}`;
+
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: 10000,
+        maxBuffer: 1024 * 1024, // 1MB buffer
+      });
+
+      if (stdout && stdout.trim()) {
+        // Truncate very long output to avoid token limits
+        const output = stdout.trim();
+        const isTruncated = output.length > 6000;
+        const truncatedOutput = isTruncated
+          ? output.substring(0, 6000) + "..."
+          : output;
+
+        // Apply validation if the tool has a validation function
+        if (strategy.validation && !strategy.validation(truncatedOutput)) {
+          if (this.verboseToolLogging) {
+            const failureReason = this.getValidationFailureReason(
+              strategy.name,
+              truncatedOutput,
+            );
+            console.log(
+              `⚠️  Tool ${strategy.name} validation failed for ${path.basename(
+                filePath,
+              )}: ${failureReason}`,
+            );
+          }
+          return null; // Validation failed
+        }
+
+        // Log successful tool execution if verbose mode is enabled
+        if (this.verboseToolLogging) {
+          console.log(
+            `✅ Tool ${strategy.name} succeeded for ${path.basename(
+              filePath,
+            )} (${truncatedOutput.length} characters)`,
+          );
+        }
+
+        return `${strategy.description}:\n${truncatedOutput}`;
+      }
+
+      return null;
+    } catch (error) {
+      return null;
+    }
   }
 
   private isImageFile(ext: string): boolean {
