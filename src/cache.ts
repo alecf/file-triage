@@ -3,22 +3,6 @@ import { promises as fs } from "fs";
 import path from "path";
 import { hashFile } from "./hasher.js";
 
-export interface CacheEntry {
-  hash: string;
-  embedding: number[];
-  filePath: string;
-  lastModified: number;
-  size: number;
-  strategy: string;
-  // Add validation flags to avoid repeated I/O
-  isValidated?: boolean;
-  isStale?: boolean;
-}
-
-export interface CacheData {
-  [fileName: string]: CacheEntry;
-}
-
 export interface CachedEmbeddingResult {
   embedding: number[];
   strategy: string;
@@ -34,14 +18,6 @@ export class EmbeddingCache {
   constructor(directory: string, fastMode: boolean = false) {
     this.directory = directory;
     this.fastMode = fastMode;
-  }
-
-  /**
-   * Set fast mode for cache validation
-   * When enabled, uses only file stats for validation (faster but less reliable)
-   */
-  setFastMode(enabled: boolean): void {
-    this.fastMode = enabled;
   }
 
   private getDbPath(): string {
@@ -86,106 +62,6 @@ export class EmbeddingCache {
     `);
 
     this.isInitialized = true;
-  }
-
-  /**
-   * Batch validate multiple cache entries to reduce I/O operations
-   */
-  private async batchValidateCacheEntries(filePaths: string[]): Promise<void> {
-    const validationPromises = filePaths.map(async (filePath) => {
-      const fileName = path.basename(filePath);
-
-      try {
-        const stats = await fs.stat(filePath);
-
-        if (this.fastMode) {
-          // Fast mode: only check stats (faster but less reliable)
-          await this.client.execute({
-            sql: `
-              UPDATE cache_entries 
-              SET is_validated = 1, is_stale = CASE 
-                WHEN last_modified = ? AND size = ? THEN 0 
-                ELSE 1 
-              END
-              WHERE file_name = ?
-            `,
-            args: [stats.mtime.getTime(), stats.size, fileName],
-          });
-        } else {
-          // Accurate mode: check stats first, then hash if needed
-          if (stats.size < 1024 * 1024) {
-            // Small files: trust stats
-            await this.client.execute({
-              sql: `
-                UPDATE cache_entries 
-                SET is_validated = 1, is_stale = CASE 
-                  WHEN last_modified = ? AND size = ? THEN 0 
-                  ELSE 1 
-                END
-                WHERE file_name = ?
-              `,
-              args: [stats.mtime.getTime(), stats.size, fileName],
-            });
-          } else {
-            // Large files: verify hash
-            const entry = await this.client.execute({
-              sql: `SELECT hash FROM cache_entries WHERE file_name = ?`,
-              args: [fileName],
-            });
-
-            if (entry.rows.length > 0 && entry.rows[0].hash) {
-              try {
-                const currentHash = await hashFile(filePath);
-                const isStale = entry.rows[0].hash !== currentHash;
-
-                await this.client.execute({
-                  sql: `
-                    UPDATE cache_entries 
-                    SET is_validated = 1, is_stale = ?
-                    WHERE file_name = ?
-                  `,
-                  args: [isStale ? 1 : 0, fileName],
-                });
-              } catch (error) {
-                // If hashing fails, fall back to stats-based validation
-                await this.client.execute({
-                  sql: `
-                    UPDATE cache_entries 
-                    SET is_validated = 1, is_stale = CASE 
-                      WHEN last_modified = ? AND size = ? THEN 0 
-                      ELSE 1 
-                    END
-                    WHERE file_name = ?
-                  `,
-                  args: [stats.mtime.getTime(), stats.size, fileName],
-                });
-              }
-            } else {
-              // No hash available, trust stats
-              await this.client.execute({
-                sql: `
-                  UPDATE cache_entries 
-                  SET is_validated = 1, is_stale = CASE 
-                    WHEN last_modified = ? AND size = ? THEN 0 
-                    ELSE 1 
-                  END
-                  WHERE file_name = ?
-                `,
-                args: [stats.mtime.getTime(), stats.size, fileName],
-              });
-            }
-          }
-        }
-      } catch (error) {
-        // Mark as stale if file access fails
-        await this.client.execute({
-          sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 1 WHERE file_name = ?`,
-          args: [fileName],
-        });
-      }
-    });
-
-    await Promise.all(validationPromises);
   }
 
   /**
@@ -320,38 +196,6 @@ export class EmbeddingCache {
 
     // If marked as stale, return null
     return null;
-  }
-
-  /**
-   * Batch get cached embeddings for multiple files
-   */
-  async getCachedEmbeddings(
-    filePaths: string[],
-  ): Promise<Map<string, CachedEmbeddingResult>> {
-    const results = new Map<string, CachedEmbeddingResult>();
-
-    // Batch validate all cache entries first
-    await this.batchValidateCacheEntries(filePaths);
-
-    // Now collect all valid cached embeddings
-    for (const filePath of filePaths) {
-      const fileName = path.basename(filePath);
-
-      const result = await this.client.execute({
-        sql: `SELECT * FROM cache_entries WHERE file_name = ? AND is_validated = 1 AND is_stale = 0`,
-        args: [fileName],
-      });
-
-      if (result.rows.length > 0) {
-        const entry = result.rows[0];
-        results.set(filePath, {
-          embedding: JSON.parse(entry.embedding),
-          strategy: entry.strategy,
-        });
-      }
-    }
-
-    return results;
   }
 
   async setCachedEmbedding(
