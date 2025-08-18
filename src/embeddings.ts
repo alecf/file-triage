@@ -1,6 +1,7 @@
 import { exec } from "child_process";
 import { promises as fs } from "fs";
 import OpenAI from "openai";
+import pLimit from "p-limit";
 import path from "path";
 import { promisify } from "util";
 import { generateFileInfoText } from "./fileinfo.js";
@@ -44,33 +45,34 @@ export class EmbeddingService {
       error?: string;
     }>
   > {
-    const results: Array<{
-      filePath: string;
-      embedding: number[];
-      strategy: string;
-      error?: string;
-    }> = [];
+    // Create a limiter that allows max 100 concurrent operations
+    const limit = pLimit(100);
 
-    for (const filePath of filePaths) {
-      try {
-        const result = await this.getFileEmbedding(filePath);
-        results.push({
-          filePath,
-          embedding: result.embedding,
-          strategy: result.strategy,
-        });
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        results.push({
-          filePath,
-          embedding: [],
-          strategy: "error",
-          error: errorMessage,
-        });
-      }
-    }
+    // Create an array of promises for parallel processing
+    const promises = filePaths.map((filePath) =>
+      limit(async () => {
+        try {
+          const result = await this.getFileEmbedding(filePath);
+          return {
+            filePath,
+            embedding: result.embedding,
+            strategy: result.strategy,
+          };
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          return {
+            filePath,
+            embedding: [],
+            strategy: "error",
+            error: errorMessage,
+          };
+        }
+      }),
+    );
 
+    // Wait for all promises to resolve
+    const results = await Promise.all(promises);
     return results;
   }
 

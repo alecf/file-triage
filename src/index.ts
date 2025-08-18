@@ -124,7 +124,7 @@ async function main() {
   program
     .name("file-triage")
     .description(
-      "CLI tool for triaging files using embeddings and auto-clustering (auto-clustering always enabled, fast cache by default)",
+      "CLI tool for triaging files using embeddings and auto-clustering with database cache (auto-clustering always enabled, fast cache by default)",
     )
     .version("1.0.0")
     .argument("<directories...>", "directories to process")
@@ -147,6 +147,8 @@ async function main() {
       "--strict-cache",
       "use strict cache validation (slower but more reliable)",
     )
+    .option("--cache-stats", "show cache statistics and exit")
+    .option("--cache-cleanup", "clean up stale cache entries and exit")
     .action(async (directories: string[], options) => {
       try {
         // Validate OpenAI API key
@@ -158,6 +160,65 @@ async function main() {
             ),
           );
           process.exit(1);
+        }
+
+        // Handle cache stats option
+        if (options.cacheStats) {
+          if (directories.length === 0) {
+            console.error(
+              chalk.red(
+                "Error: Please specify a directory to check cache stats",
+              ),
+            );
+            process.exit(1);
+          }
+
+          const dir = directories[0];
+          const cache = new EmbeddingCache(dir, options.strictCache !== true);
+          await cache.initialize();
+
+          const stats = await cache.getCacheStats();
+          console.log(chalk.blue.bold(`Cache Statistics for: ${dir}`));
+          console.log(chalk.gray(`Total entries: ${stats.totalEntries}`));
+          console.log(chalk.gray(`Valid entries: ${stats.validEntries}`));
+          console.log(chalk.gray(`Stale entries: ${stats.staleEntries}`));
+          console.log(
+            chalk.gray(
+              `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
+            ),
+          );
+
+          await cache.close();
+          return;
+        }
+
+        // Handle cache cleanup option
+        if (options.cacheCleanup) {
+          if (directories.length === 0) {
+            console.error(
+              chalk.red("Error: Please specify a directory to clean cache"),
+            );
+            process.exit(1);
+          }
+
+          const dir = directories[0];
+          const cache = new EmbeddingCache(dir, options.strictCache !== true);
+          await cache.initialize();
+
+          console.log(chalk.blue(`Cleaning up stale cache entries in: ${dir}`));
+          await cache.cleanupStaleEntries();
+
+          const stats = await cache.getCacheStats();
+          console.log(chalk.green(`Cleanup completed!`));
+          console.log(chalk.gray(`Remaining entries: ${stats.totalEntries}`));
+          console.log(
+            chalk.gray(
+              `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
+            ),
+          );
+
+          await cache.close();
+          return;
         }
 
         // Validate directories
@@ -200,13 +261,13 @@ async function main() {
         if (options.strictCache !== true) {
           console.log(
             chalk.yellow(
-              "⚡ Fast cache mode enabled (default) - cache validation uses file stats only (faster but less reliable)",
+              "⚡ Fast cache mode enabled (default) - validation uses file stats only (faster but less reliable)",
             ),
           );
         } else {
           console.log(
             chalk.yellow(
-              "🔒 Strict cache mode enabled - cache validation uses full file content (slower but more reliable)",
+              "🔒 Strict cache mode enabled - validation uses full file content (slower but more reliable)",
             ),
           );
         }
@@ -314,6 +375,19 @@ async function main() {
         process.exit(1);
       }
     });
+
+  // Graceful shutdown handler
+  process.on("SIGINT", async () => {
+    console.log(chalk.yellow("\nReceived SIGINT, shutting down gracefully..."));
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", async () => {
+    console.log(
+      chalk.yellow("\nReceived SIGTERM, shutting down gracefully..."),
+    );
+    process.exit(0);
+  });
 
   program.parse();
 }
