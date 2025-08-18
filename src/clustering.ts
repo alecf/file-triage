@@ -586,3 +586,46 @@ function describeParameterChanges(
 
   return changes.join(", ");
 }
+
+/**
+ * Split a single cluster into multiple sub-clusters using auto-clustering
+ * This is useful during interactive triage when a user wants to break down a large cluster
+ */
+export async function splitCluster(
+  cluster: Cluster,
+  autoOptions: AutoClusteringOptions = {},
+): Promise<Cluster[]> {
+  if (cluster.files.length < 4) {
+    // If cluster is too small, return it unchanged
+    return [cluster];
+  }
+
+  console.log(
+    `\n🔄 Splitting cluster ${cluster.id} (${cluster.files.length} files) into sub-clusters...`,
+  );
+
+  // Apply auto-clustering to just this cluster's files
+  const result = await autoClusterFiles(
+    cluster.files,
+    {
+      minClusterSize: 2, // Start with minimum size for splitting
+    },
+    {
+      ...autoOptions,
+      maxIterations: 3, // Fewer iterations for splitting
+      enableVerbose: false, // Less verbose output for splitting
+    },
+  );
+
+  // Assign new IDs to the sub-clusters
+  const subClusters = result.clusters.map((subCluster, index) => ({
+    ...subCluster,
+    id: cluster.id * 1000 + index, // Use a large multiplier to avoid ID conflicts
+  }));
+
+  console.log(
+    `✅ Split cluster ${cluster.id} into ${subClusters.length} sub-clusters`,
+  );
+
+  return subClusters;
+}

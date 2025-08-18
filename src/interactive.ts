@@ -1,7 +1,14 @@
 import chalk from "chalk";
+import { spawn } from "child_process";
 import inquirer from "inquirer";
 import path from "path";
-import { Cluster, FileItem, formatDate, formatFileSize } from "./clustering.js";
+import {
+  Cluster,
+  FileItem,
+  formatDate,
+  formatFileSize,
+  splitCluster,
+} from "./clustering.js";
 import { displayFileInfo } from "./fileinfo.js";
 import { deleteFile, renameFile } from "./operations.js";
 
@@ -22,15 +29,45 @@ export async function triageClusters(clusters: Cluster[]): Promise<void> {
     chalk.blue.bold(`\nFound ${clusters.length} clusters to triage.\n`),
   );
 
-  for (let i = 0; i < clusters.length; i++) {
-    const cluster = clusters[i];
+  let currentClusters = [...clusters]; // Create a mutable copy
+  let currentIndex = 0;
+
+  while (currentIndex < currentClusters.length) {
+    const cluster = currentClusters[currentIndex];
     console.log(
       chalk.yellow.bold(
         `\n=== Cluster ${cluster.id} (${cluster.files.length} files) ===`,
       ),
     );
 
-    await triageCluster(cluster, i + 1, clusters.length);
+    const result = await triageCluster(
+      cluster,
+      currentIndex + 1,
+      currentClusters.length,
+      currentClusters,
+      currentIndex,
+    );
+
+    if (result === "split") {
+      // Split the cluster and replace it with sub-clusters
+      const subClusters = await splitCluster(cluster);
+
+      // Replace the current cluster with the sub-clusters
+      currentClusters.splice(currentIndex, 1, ...subClusters);
+
+      // Update the total count display
+      console.log(
+        chalk.blue.bold(
+          `\nNow have ${currentClusters.length} clusters to triage.\n`,
+        ),
+      );
+
+      // Continue with the first sub-cluster (don't increment index)
+      continue;
+    }
+
+    // Move to next cluster
+    currentIndex++;
   }
 
   console.log(chalk.green.bold("\nTriage complete!"));
@@ -43,7 +80,9 @@ async function triageCluster(
   cluster: Cluster,
   clusterNum: number,
   totalClusters: number,
-): Promise<void> {
+  allClusters: Cluster[],
+  currentClusterIndex: number,
+): Promise<boolean | string> {
   // Initialize file statuses for this cluster
   const fileStatuses: FileStatus[] = cluster.files.map((file) => ({
     originalPath: file.filePath,
@@ -65,6 +104,8 @@ async function triageCluster(
       totalClusters,
       fileStatuses,
       cluster,
+      allClusters,
+      currentClusterIndex,
     );
 
     if (result === "deleteAllRemaining") {
@@ -84,6 +125,9 @@ async function triageCluster(
 
       console.log(chalk.cyan("Skipping to next cluster...\n"));
       break;
+    } else if (result === "split") {
+      // Return split to trigger cluster splitting in the main loop
+      return "split";
     } else if (!result) {
       // Show final cluster state after skipping
       displayClusterSummary(cluster, fileStatuses);
@@ -94,6 +138,7 @@ async function triageCluster(
 
   // Show final cluster summary
   displayClusterSummary(cluster, fileStatuses, true);
+  return false; // Default return for non-split clusters
 }
 
 /**
@@ -216,6 +261,8 @@ async function triageFile(
   totalClusters: number,
   fileStatuses: FileStatus[],
   originalCluster: Cluster,
+  allClusters: Cluster[],
+  currentClusterIndex: number,
 ): Promise<boolean | string> {
   const fileName = path.basename(file.filePath);
   const size = formatFileSize(file.size);
@@ -259,7 +306,9 @@ async function triageFile(
           { name: "🚫 Skip to next cluster", value: "skipCluster", key: "s" },
           { name: "✏️  Rename this file", value: "rename", key: "r" },
           { name: "ℹ️  Show file info", value: "info", key: "i" },
+          { name: "🔀 Split this cluster", value: "split", key: "p" },
           { name: "🚪 Quit triage tool", value: "quit", key: "q" },
+          { name: "👁️  Preview this file", value: "preview", key: "v" },
         ],
       },
     ]);
@@ -310,6 +359,12 @@ async function triageFile(
 
         return false;
 
+      case "split":
+        console.log(
+          chalk.blue(`\n🔀 Splitting cluster ${originalCluster.id}...`),
+        );
+        return "split";
+
       case "quit":
         console.log(chalk.yellow("Exiting triage tool..."));
         process.exit(0);
@@ -351,6 +406,27 @@ async function triageFile(
 
       case "info":
         await displayFileInfo(file.filePath);
+        continue; // Stay on same file
+
+      case "preview":
+        if (process.platform === "darwin") {
+          const qlmanage = spawn("qlmanage", ["-p", file.filePath]);
+          qlmanage.on("close", (code) => {
+            if (code !== 0) {
+              console.error(
+                chalk.red(
+                  `Failed to preview file with qlmanage. Code: ${code}`,
+                ),
+              );
+            }
+          });
+        } else {
+          console.warn(
+            chalk.yellow(
+              `Preview functionality is only available on macOS (darwin).`,
+            ),
+          );
+        }
         continue; // Stay on same file
     }
   }
