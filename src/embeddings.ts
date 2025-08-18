@@ -23,11 +23,13 @@ export class EmbeddingService {
   private openai: OpenAI;
   private availableTools: Map<string, ToolInfo> = new Map();
   private toolDetectionDone = false;
+  private verboseToolLogging = false;
 
-  constructor(apiKey?: string) {
+  constructor(apiKey?: string, verboseToolLogging = false) {
     this.openai = new OpenAI({
       apiKey: apiKey || process.env.OPENAI_API_KEY,
     });
+    this.verboseToolLogging = verboseToolLogging;
   }
 
   /**
@@ -123,6 +125,100 @@ export class EmbeddingService {
       supportedFileTypes,
       totalTools: this.availableTools.size,
     };
+  }
+
+  /**
+   * Get validation requirements for tools
+   */
+  getToolValidationRequirements(): Map<string, string> {
+    const requirements = new Map<string, string>();
+
+    if (this.availableTools.has("pdftotext")) {
+      requirements.set(
+        "pdftotext",
+        "Requires >100 characters of text content with letters",
+      );
+    }
+    if (this.availableTools.has("antiword")) {
+      requirements.set(
+        "antiword",
+        "Requires >100 characters of text content with letters",
+      );
+    }
+    if (this.availableTools.has("catdoc")) {
+      requirements.set(
+        "catdoc",
+        "Requires >100 characters of text content with letters",
+      );
+    }
+    if (this.availableTools.has("xlsx2csv")) {
+      requirements.set(
+        "xlsx2csv",
+        "Requires >50 characters of CSV content with commas",
+      );
+    }
+    if (this.availableTools.has("strings")) {
+      requirements.set(
+        "strings",
+        "Requires >50 characters with >5 meaningful words",
+      );
+    }
+
+    return requirements;
+  }
+
+  /**
+   * Get detailed validation failure reason for a specific tool and output
+   */
+  getValidationFailureReason(toolName: string, output: string): string {
+    const tool = this.availableTools.get(toolName);
+    if (!tool || !tool.validation) {
+      return "No validation function defined for this tool";
+    }
+
+    const cleanOutput = output
+      .replace(new RegExp(`${tool.description}:\\s*`, "i"), "")
+      .trim();
+
+    switch (toolName) {
+      case "pdftotext":
+      case "antiword":
+      case "catdoc":
+        if (cleanOutput.length <= 100) {
+          return `Output too short: ${cleanOutput.length} characters (need >100)`;
+        }
+        if (!/[a-zA-Z]/.test(cleanOutput)) {
+          return "Output contains no letters";
+        }
+        return "Unknown validation failure";
+
+      case "xlsx2csv":
+        if (cleanOutput.length <= 50) {
+          return `Output too short: ${cleanOutput.length} characters (need >50)`;
+        }
+        if (!cleanOutput.includes(",")) {
+          return "Output doesn't contain CSV format (no commas)";
+        }
+        return "Unknown validation failure";
+
+      case "strings":
+        if (cleanOutput.length <= 50) {
+          return `Output too short: ${cleanOutput.length} characters (need >50)`;
+        }
+        const words = cleanOutput
+          .split(/\s+/)
+          .filter((word) => word.length > 2);
+        if (words.length <= 5) {
+          return `Too few meaningful words: ${words.length} (need >5)`;
+        }
+        if (!/[a-zA-Z]/.test(cleanOutput)) {
+          return "Output contains no letters";
+        }
+        return "Unknown validation failure";
+
+      default:
+        return "Unknown tool validation failure";
+    }
   }
 
   private async extractTextContent(
@@ -266,67 +362,13 @@ export class EmbeddingService {
           strategies.push(tool);
         }
       }
-      if (this.availableTools.has("exiftool")) {
-        const tool = this.availableTools.get("exiftool")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
     }
 
-    // Audio strategies
-    if (this.isAudioFile(ext) || detectedType.includes("audio")) {
-      if (this.availableTools.has("ffprobe")) {
-        const tool = this.availableTools.get("ffprobe")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("exiftool")) {
-        const tool = this.availableTools.get("exiftool")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Video strategies
-    if (this.isVideoFile(ext) || detectedType.includes("video")) {
-      if (this.availableTools.has("ffprobe")) {
-        const tool = this.availableTools.get("ffprobe")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("exiftool")) {
-        const tool = this.availableTools.get("exiftool")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Archive strategies
-    if (this.isArchiveFile(ext) || detectedType.includes("archive")) {
-      if (this.availableTools.has("unzip")) {
-        const tool = this.availableTools.get("unzip")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-      if (this.availableTools.has("tar")) {
-        const tool = this.availableTools.get("tar")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-    }
-
-    // Office document strategies
+    // Document strategies
     if (
-      this.isOfficeFile(ext) ||
-      detectedType.includes("microsoft") ||
-      detectedType.includes("office")
+      ext === ".doc" ||
+      ext === ".docx" ||
+      detectedType.includes("microsoft word")
     ) {
       if (this.availableTools.has("antiword")) {
         const tool = this.availableTools.get("antiword")!;
@@ -340,6 +382,10 @@ export class EmbeddingService {
           strategies.push(tool);
         }
       }
+    }
+
+    // Spreadsheet strategies
+    if (ext === ".xlsx" || ext === ".xls" || detectedType.includes("excel")) {
       if (this.availableTools.has("xlsx2csv")) {
         const tool = this.availableTools.get("xlsx2csv")!;
         if (tool && tool.name && tool.name.trim() !== "") {
@@ -348,31 +394,80 @@ export class EmbeddingService {
       }
     }
 
-    // Add fallback strategies for binary files
-    if (strategies.length === 0) {
-      // Try to extract readable strings from binary files
-      if (this.availableTools.has("strings")) {
-        const tool = this.availableTools.get("strings")!;
-        if (tool && tool.name && tool.name.trim() !== "") {
-          strategies.push(tool);
-        }
-      }
-
-      // Add file header analysis for unknown binary files
-      if (this.availableTools.has("hexdump")) {
-        const tool = this.availableTools.get("hexdump")!;
+    // Archive strategies
+    if (ext === ".zip" || detectedType.includes("zip")) {
+      if (this.availableTools.has("unzip")) {
+        const tool = this.availableTools.get("unzip")!;
         if (tool && tool.name && tool.name.trim() !== "") {
           strategies.push(tool);
         }
       }
     }
 
-    // Final validation: ensure all strategies have valid names
-    const validStrategies = strategies.filter(
-      (strategy) => strategy && strategy.name && strategy.name.trim() !== "",
-    );
+    if (
+      ext === ".tar" ||
+      ext === ".tar.gz" ||
+      ext === ".tgz" ||
+      detectedType.includes("tar")
+    ) {
+      if (this.availableTools.has("tar")) {
+        const tool = this.availableTools.get("tar")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
 
-    return validStrategies;
+    // Media strategies
+    if (
+      this.isAudioFile(ext) ||
+      this.isVideoFile(ext) ||
+      detectedType.includes("video") ||
+      detectedType.includes("audio")
+    ) {
+      if (this.availableTools.has("ffprobe")) {
+        const tool = this.availableTools.get("ffprobe")!;
+        if (tool && tool.name && tool.name.trim() !== "") {
+          strategies.push(tool);
+        }
+      }
+    }
+
+    // Generic metadata extraction
+    if (this.availableTools.has("exiftool")) {
+      const tool = this.availableTools.get("exiftool")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Binary file analysis
+    if (this.availableTools.has("strings")) {
+      const tool = this.availableTools.get("strings")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Fallback strategies for binary files
+    if (this.availableTools.has("hexdump")) {
+      const tool = this.availableTools.get("hexdump")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    if (this.availableTools.has("od")) {
+      const tool = this.availableTools.get("od")!;
+      if (tool && tool.name && tool.name.trim() !== "") {
+        strategies.push(tool);
+      }
+    }
+
+    // Sort strategies by priority (higher numbers = higher priority)
+    strategies.sort((a, b) => (b.priority || 1) - (a.priority || 1));
+
+    return strategies;
   }
 
   private async executeStrategy(
@@ -397,6 +492,31 @@ export class EmbeddingService {
         const truncatedOutput = isTruncated
           ? output.substring(0, 6000) + "..."
           : output;
+
+        // Apply validation if the tool has a validation function
+        if (strategy.validation && !strategy.validation(truncatedOutput)) {
+          if (this.verboseToolLogging) {
+            const failureReason = this.getValidationFailureReason(
+              strategy.name,
+              truncatedOutput,
+            );
+            console.log(
+              `⚠️  Tool ${strategy.name} validation failed for ${path.basename(
+                filePath,
+              )}: ${failureReason}`,
+            );
+          }
+          return null; // Validation failed
+        }
+
+        // Log successful tool execution if verbose mode is enabled
+        if (this.verboseToolLogging) {
+          console.log(
+            `✅ Tool ${strategy.name} succeeded for ${path.basename(
+              filePath,
+            )} (${truncatedOutput.length} characters)`,
+          );
+        }
 
         return `${strategy.description}:\n${truncatedOutput}`;
       }
@@ -553,34 +673,47 @@ export class EmbeddingService {
   private async detectAvailableTools(): Promise<void> {
     const tools: ToolInfo[] = [
       {
-        name: "pdfinfo",
-        command: "pdfinfo",
-        args: ["FILEPATH"],
-        description: "PDF metadata and information",
-      },
-      {
         name: "pdftotext",
         command: "pdftotext",
         args: ["FILEPATH", "-"],
         description: "PDF text content extraction",
+        priority: 10, // Higher priority than pdfinfo
+        validation: (output: string) => {
+          // Only succeed if we extract meaningful text content (more than 100 characters)
+          const textContent = output
+            .replace(/PDF text content extraction:\s*/i, "")
+            .trim();
+          return textContent.length > 100 && /[a-zA-Z]/.test(textContent);
+        },
       },
+      {
+        name: "pdfinfo",
+        command: "pdfinfo",
+        args: ["FILEPATH"],
+        description: "PDF metadata and information",
+        priority: 1,
+      },
+
       {
         name: "identify",
         command: "identify",
         args: ["-verbose", "FILEPATH"],
         description: "ImageMagick image information",
+        priority: 1,
       },
       {
         name: "gm-identify",
         command: "gm",
         args: ["identify", "-verbose", "FILEPATH"],
         description: "GraphicsMagick image information",
+        priority: 1,
       },
       {
         name: "exiftool",
         command: "exiftool",
         args: ["FILEPATH"],
         description: "File metadata extraction",
+        priority: 1,
       },
       {
         name: "ffprobe",
@@ -595,60 +728,109 @@ export class EmbeddingService {
           "FILEPATH",
         ],
         description: "FFmpeg media file information",
+        priority: 1,
       },
       {
         name: "unzip",
         command: "unzip",
         args: ["-l", "FILEPATH"],
         description: "ZIP archive contents",
+        priority: 1,
       },
       {
         name: "tar",
         command: "tar",
         args: ["-tf", "FILEPATH"],
         description: "TAR archive contents",
+        priority: 1,
       },
       {
         name: "antiword",
         command: "antiword",
         args: ["FILEPATH"],
         description: "Microsoft Word document text extraction",
+        priority: 5, // Higher priority for text extraction
+        validation: (output: string) => {
+          // Only succeed if we extract meaningful text content
+          const textContent = output
+            .replace(/Microsoft Word document text extraction:\s*/i, "")
+            .trim();
+          return textContent.length > 100 && /[a-zA-Z]/.test(textContent);
+        },
       },
       {
         name: "catdoc",
         command: "catdoc",
         args: ["FILEPATH"],
         description: "Microsoft Word document text extraction (alternative)",
+        priority: 4, // Slightly lower than antiword
+        validation: (output: string) => {
+          // Only succeed if we extract meaningful text content
+          const textContent = output
+            .replace(
+              /Microsoft Word document text extraction \(alternative\):\s*/i,
+              "",
+            )
+            .trim();
+          return textContent.length > 100 && /[a-zA-Z]/.test(textContent);
+        },
       },
       {
         name: "xlsx2csv",
         command: "xlsx2csv",
         args: ["FILEPATH"],
         description: "Excel spreadsheet conversion",
+        priority: 5, // Higher priority for spreadsheet data
+        validation: (output: string) => {
+          // Only succeed if we get meaningful CSV content
+          const csvContent = output
+            .replace(/Excel spreadsheet conversion:\s*/i, "")
+            .trim();
+          return csvContent.length > 50 && csvContent.includes(",");
+        },
       },
       {
         name: "file",
         command: "file",
         args: ["FILEPATH"],
         description: "File type detection",
+        priority: 1,
       },
       {
         name: "strings",
         command: "strings",
         args: ["FILEPATH"],
         description: "Extract readable strings from binary files",
+        priority: 3, // Medium priority for binary text extraction
+        validation: (output: string) => {
+          // Only succeed if we extract meaningful strings
+          const stringsContent = output
+            .replace(/Extract readable strings from binary files:\s*/i, "")
+            .trim();
+          // Check for meaningful content: should have reasonable length and contain actual words
+          const words = stringsContent
+            .split(/\s+/)
+            .filter((word) => word.length > 2);
+          return (
+            stringsContent.length > 50 &&
+            words.length > 5 &&
+            /[a-zA-Z]/.test(stringsContent)
+          );
+        },
       },
       {
         name: "hexdump",
         command: "hexdump",
         args: ["-C", "-n", "1024", "FILEPATH"],
         description: "Hexadecimal dump of file header",
+        priority: 1,
       },
       {
         name: "od",
         command: "od",
         args: ["-c", "-N", "1024", "FILEPATH"],
         description: "Octal dump of file header",
+        priority: 1,
       },
     ];
 

@@ -9,7 +9,6 @@ import { EmbeddingCache } from "./cache.js";
 import {
   analyzeClusteringResults,
   autoClusterFiles,
-  clusterFiles,
   FileItem,
 } from "./clustering.js";
 import { EmbeddingService } from "./embeddings.js";
@@ -124,7 +123,9 @@ async function processDirectory(
 async function main() {
   program
     .name("file-triage")
-    .description("CLI tool for triaging files using embeddings and clustering")
+    .description(
+      "CLI tool for triaging files using embeddings and auto-clustering (auto-clustering always enabled, fast cache by default)",
+    )
     .version("1.0.0")
     .argument("<directories...>", "directories to process")
     .option(
@@ -139,22 +140,12 @@ async function main() {
     )
     .option("--max-cluster-size <size>", "maximum files per cluster", "50")
     .option(
-      "--auto-cluster",
-      "automatically adjust clustering parameters for optimal results",
-    )
-    .option(
       "--target-clusters <count>",
-      "target number of clusters for auto-clustering",
+      "target number of clusters for auto-clustering (optional)",
     )
-    .option("--verbose-clustering", "show detailed auto-clustering information")
     .option(
-      "--ultra-strict",
-      "use ultra-strict clustering (max 5% per cluster, max 20 files per cluster)",
-    )
-    .option("--no-progress", "disable progress indicators")
-    .option(
-      "--fast-cache",
-      "use fast cache validation (faster but less reliable)",
+      "--strict-cache",
+      "use strict cache validation (slower but more reliable)",
     )
     .action(async (directories: string[], options) => {
       try {
@@ -182,87 +173,65 @@ async function main() {
           }
         }
 
-        const embeddingService = new EmbeddingService(apiKey);
-        const minClusterSize = parseInt(options.minClusterSize);
-        const similarityThreshold = parseFloat(
-          options.similarityThreshold || "0.95",
-        );
-        const maxClusterSize = parseInt(options.maxClusterSize || "50");
-        const enableAutoCluster = options.autoCluster === true;
         const targetClusters = options.targetClusters
           ? parseInt(options.targetClusters)
           : undefined;
-        const verboseClustering = options.verboseClustering === true;
-        const ultraStrict = options.ultraStrict === true;
-        const showProgress = options.progress !== false;
-        const useFastCache = options.fastCache === true;
 
-        // Apply ultra-strict settings if enabled
-        if (ultraStrict) {
-          console.log(
-            chalk.yellow(
-              "🔒 Ultra-strict clustering enabled - will enforce very small cluster sizes",
-            ),
-          );
-        }
+        // Create embedding service
+        const embeddingService = new EmbeddingService(apiKey, false); // verboseTools always false
 
-        const effectiveMaxClusterSize = ultraStrict ? 20 : maxClusterSize;
         console.log(chalk.blue.bold("File Triage Tool"));
         console.log(
           chalk.gray(
             `Processing ${directories.length} directories with clustering parameters:\n` +
-              `  - Minimum cluster size: ${minClusterSize}\n` +
-              `  - Similarity threshold: ${similarityThreshold}\n` +
-              `  - Maximum cluster size: ${effectiveMaxClusterSize}${
-                ultraStrict ? " (ultra-strict)" : ""
-              }\n` +
-              `  - Auto-clustering: ${
-                enableAutoCluster ? "enabled" : "disabled"
-              }\n` +
+              `  - Minimum cluster size: ${options.minClusterSize}\n` +
+              `  - Similarity threshold: ${options.similarityThreshold}\n` +
+              `  - Maximum cluster size: ${options.maxClusterSize}\n` +
+              `  - Auto-clustering: enabled\n` +
               (targetClusters
                 ? `  - Target clusters: ${targetClusters}\n`
                 : "") +
-              `  - Verbose clustering: ${
-                verboseClustering ? "enabled" : "disabled"
+              `  - Cache mode: ${
+                options.strictCache !== true ? "fast" : "strict"
               }\n`,
           ),
         );
 
-        if (useFastCache) {
+        if (options.strictCache !== true) {
           console.log(
             chalk.yellow(
-              "⚠️  Fast cache mode enabled - cache validation uses file stats only (faster but less reliable)",
+              "⚡ Fast cache mode enabled (default) - cache validation uses file stats only (faster but less reliable)",
+            ),
+          );
+        } else {
+          console.log(
+            chalk.yellow(
+              "🔒 Strict cache mode enabled - cache validation uses full file content (slower but more reliable)",
             ),
           );
         }
 
         // Process all directories with progress
         const allFiles: FileItem[] = [];
-        const overallSpinner = showProgress
-          ? ora(`Processing directories...`).start()
-          : null;
+        const overallSpinner = ora(`Processing directories...`).start();
 
         for (let i = 0; i < directories.length; i++) {
           const dir = directories[i];
-          if (showProgress) {
-            overallSpinner!.text = `Processing directory ${i + 1}/${
-              directories.length
-            }: ${path.basename(dir)}`;
-          }
+          overallSpinner.text = `Processing directory ${i + 1}/${
+            directories.length
+          }: ${path.basename(dir)}`;
 
           const dirFiles = await processDirectory(
             path.resolve(dir),
             embeddingService,
-            useFastCache,
+            options.strictCache !== true,
           );
           allFiles.push(...dirFiles);
         }
 
-        if (showProgress) {
-          overallSpinner!.succeed(
-            `Completed processing ${directories.length} directories`,
-          );
-        }
+        overallSpinner.succeed(
+          `Completed processing ${directories.length} directories`,
+        );
 
         console.log(chalk.green(`\nProcessed ${allFiles.length} files total`));
 
@@ -272,59 +241,48 @@ async function main() {
         }
 
         // Cluster files with progress
-        if (showProgress) {
-          console.log(chalk.blue("\nClustering files..."));
-        }
+        console.log(chalk.blue("\nClustering files..."));
 
         let clusters;
-        if (enableAutoCluster) {
-          // Use auto-clustering with parameter adjustment
-          if (showProgress) {
-            console.log(
-              chalk.blue(
-                "🔄 Auto-clustering enabled - will adjust parameters automatically",
-              ),
-            );
-          }
+        // Always use auto-clustering
+        console.log(
+          chalk.blue(
+            "🔄 Auto-clustering enabled - will adjust parameters automatically",
+          ),
+        );
 
-          const autoResult = await autoClusterFiles(
-            allFiles,
-            {
-              minClusterSize,
-              similarityThreshold,
-              maxClusterSize: ultraStrict ? 20 : maxClusterSize,
-            },
-            {
-              targetClusterCount: targetClusters,
-              enableVerbose: verboseClustering,
-              maxClusterSizePercent: ultraStrict ? 0.05 : 0.1, // 5% for ultra-strict, 10% for normal
-            },
-          );
-
-          clusters = autoResult.clusters;
-
-          // Show auto-clustering results
-          console.log(
-            chalk.green(
-              `✅ Auto-clustering completed in ${autoResult.iterations} iteration(s)`,
+        const autoResult = await autoClusterFiles(
+          allFiles,
+          {
+            minClusterSize: parseInt(options.minClusterSize),
+            similarityThreshold: parseFloat(
+              options.similarityThreshold || "0.95",
             ),
-          );
-          console.log(
-            chalk.blue(`📊 Final parameters:`, autoResult.finalOptions),
-          );
+            maxClusterSize: parseInt(options.maxClusterSize || "50"),
+          },
+          {
+            targetClusterCount: targetClusters,
+            enableVerbose: true, // Enable verbose output for better insights
+            maxClusterSizePercent: 0.15, // Increased from 0.1 to 0.15 for more realistic limits
+          },
+        );
 
-          if (autoResult.adjustments.length > 0) {
-            console.log(chalk.yellow("\n🔧 Parameter adjustments made:"));
-            autoResult.adjustments.forEach((adjustment) => {
-              console.log(chalk.yellow(`  • ${adjustment}`));
-            });
-          }
-        } else {
-          // Use manual clustering
-          clusters = await clusterFiles(allFiles, {
-            minClusterSize,
-            similarityThreshold,
-            maxClusterSize: ultraStrict ? 20 : maxClusterSize,
+        clusters = autoResult.clusters;
+
+        // Show auto-clustering results
+        console.log(
+          chalk.green(
+            `✅ Auto-clustering completed in ${autoResult.iterations} iteration(s)`,
+          ),
+        );
+        console.log(
+          chalk.blue(`📊 Final parameters:`, autoResult.finalOptions),
+        );
+
+        if (autoResult.adjustments.length > 0) {
+          console.log(chalk.yellow("\n🔧 Parameter adjustments made:"));
+          autoResult.adjustments.forEach((adjustment) => {
+            console.log(chalk.yellow(`  • ${adjustment}`));
           });
         }
 

@@ -57,43 +57,6 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Calculate cosine distance between two vectors
- */
-function calculateCosineDistance(a: number[], b: number[]): number {
-  return 1 - cosineSimilarity(a, b);
-}
-
-/**
- * Calculate cosine similarity between two vectors
- */
-function calculateCosineSimilarity(a: number[], b: number[]): number {
-  return cosineSimilarity(a, b);
-}
-
-/**
- * Find the index of the least similar file in a list of files
- */
-function findLeastSimilarFile(
-  newFile: FileItem,
-  existingFiles: FileItem[],
-): number {
-  let leastSimilarIndex = -1;
-  let minSimilarity = 1; // Start with a high similarity
-
-  for (let i = 0; i < existingFiles.length; i++) {
-    const similarity = calculateCosineSimilarity(
-      newFile.embedding,
-      existingFiles[i].embedding,
-    );
-    if (similarity < minSimilarity) {
-      minSimilarity = similarity;
-      leastSimilarIndex = i;
-    }
-  }
-  return leastSimilarIndex;
-}
-
-/**
  * Cluster files using HDBSCAN algorithm with improved parameters
  */
 export async function clusterFiles(
@@ -156,58 +119,15 @@ export async function clusterFiles(
     });
   });
 
-  // Post-process: Split clusters that exceed maxClusterSize
-  const finalClusters: Cluster[] = [];
-  let nextClusterId = Math.max(...clusters.map((c) => c.id)) + 1;
-  let splitCount = 0;
-
-  for (const cluster of clusters) {
-    if (cluster.files.length <= maxClusterSize) {
-      finalClusters.push(cluster);
-    } else {
-      // Split large cluster into smaller sub-clusters
-      console.log(
-        `✂️  Splitting large cluster ${cluster.id} (${cluster.files.length} files) into sub-clusters (max size: ${maxClusterSize})`,
-      );
-      const subClusters = splitLargeCluster(
-        cluster,
-        maxClusterSize,
-        nextClusterId,
-      );
-      finalClusters.push(...subClusters);
-      nextClusterId += subClusters.length;
-      splitCount++;
-    }
-  }
-
-  if (splitCount > 0) {
-    console.log(
-      `✅ Split ${splitCount} large clusters to respect maxClusterSize of ${maxClusterSize}`,
-    );
-  }
-
   // Sort clusters by size (largest first) and then by cluster ID
-  finalClusters.sort((a, b) => {
+  clusters.sort((a, b) => {
     if (a.files.length !== b.files.length) {
       return b.files.length - a.files.length;
     }
     return a.id - b.id;
   });
 
-  // Final validation: ensure no cluster exceeds maxClusterSize
-  const oversizedClusters = finalClusters.filter(
-    (c) => c.files.length > maxClusterSize,
-  );
-  if (oversizedClusters.length > 0) {
-    console.warn(
-      `⚠️  Warning: ${oversizedClusters.length} clusters still exceed maxClusterSize of ${maxClusterSize}:`,
-    );
-    oversizedClusters.forEach((c) => {
-      console.warn(`   Cluster ${c.id}: ${c.files.length} files`);
-    });
-  }
-
-  return finalClusters;
+  return clusters;
 }
 
 /**
@@ -230,141 +150,6 @@ function calculateCentroid(embeddings: number[][]): number[] {
   }
 
   return centroid;
-}
-
-/**
- * Split a large cluster into smaller sub-clusters that respect maxClusterSize
- */
-function splitLargeCluster(
-  cluster: Cluster,
-  maxClusterSize: number,
-  startClusterId: number,
-): Cluster[] {
-  const files = cluster.files;
-  const subClusters: Cluster[] = [];
-  let currentClusterId = startClusterId;
-
-  // If cluster is small enough, return it as is
-  if (files.length <= maxClusterSize) {
-    return [
-      {
-        ...cluster,
-        id: currentClusterId,
-      },
-    ];
-  }
-
-  // Use a more sophisticated approach: try to maintain similarity within sub-clusters
-  const numSubClusters = Math.ceil(files.length / maxClusterSize);
-
-  if (numSubClusters === 1) {
-    // Just one sub-cluster needed
-    return [
-      {
-        ...cluster,
-        id: currentClusterId,
-      },
-    ];
-  }
-
-  // For multiple sub-clusters, try to group similar files together
-  // Start with the first file as a seed for the first sub-cluster
-  const subClusterFiles: FileItem[][] = [];
-  const usedFiles = new Set<number>();
-
-  // Initialize sub-clusters with the most representative files
-  for (let i = 0; i < numSubClusters; i++) {
-    subClusterFiles[i] = [];
-  }
-
-  // Find the most representative file for each sub-cluster (most central to the cluster)
-  const centroid =
-    cluster.centroid || calculateCentroid(files.map((f) => f.embedding));
-  const distances = files.map((file, index) => ({
-    index,
-    distance: calculateCosineDistance(file.embedding, centroid),
-  }));
-
-  // Sort by distance to centroid (closest first)
-  distances.sort((a, b) => a.distance - b.distance);
-
-  // Assign the most central files as seeds for each sub-cluster
-  for (let i = 0; i < numSubClusters; i++) {
-    const seedIndex = distances[i].index;
-    subClusterFiles[i].push(files[seedIndex]);
-    usedFiles.add(seedIndex);
-  }
-
-  // Distribute remaining files to the most similar sub-cluster
-  for (let i = 0; i < files.length; i++) {
-    if (usedFiles.has(i)) continue;
-
-    const file = files[i];
-    let bestSubCluster = 0;
-    let bestSimilarity = -1;
-
-    // Find the sub-cluster with the highest average similarity
-    for (let j = 0; j < numSubClusters; j++) {
-      if (subClusterFiles[j].length >= maxClusterSize) continue;
-
-      const avgSimilarity =
-        subClusterFiles[j].reduce((sum, subFile) => {
-          return (
-            sum + calculateCosineSimilarity(file.embedding, subFile.embedding)
-          );
-        }, 0) / subClusterFiles[j].length;
-
-      if (avgSimilarity > bestSimilarity) {
-        bestSimilarity = avgSimilarity;
-        bestSubCluster = j;
-      }
-    }
-
-    // Add file to the best sub-cluster
-    if (subClusterFiles[bestSubCluster].length < maxClusterSize) {
-      subClusterFiles[bestSubCluster].push(file);
-    } else {
-      // If all sub-clusters are full, find the one with the most similar files
-      let bestFit = 0;
-      let bestFitSimilarity = -1;
-
-      for (let j = 0; j < numSubClusters; j++) {
-        const avgSimilarity =
-          subClusterFiles[j].reduce((sum, subFile) => {
-            return (
-              sum + calculateCosineSimilarity(file.embedding, subFile.embedding)
-            );
-          }, 0) / subClusterFiles[j].length;
-
-        if (avgSimilarity > bestFitSimilarity) {
-          bestFitSimilarity = avgSimilarity;
-          bestFit = j;
-        }
-      }
-
-      // Replace the least similar file in the best-fit sub-cluster
-      const leastSimilarIndex = findLeastSimilarFile(
-        file,
-        subClusterFiles[bestFit],
-      );
-      if (leastSimilarIndex !== -1) {
-        subClusterFiles[bestFit][leastSimilarIndex] = file;
-      }
-    }
-  }
-
-  // Create sub-cluster objects
-  for (let i = 0; i < numSubClusters; i++) {
-    if (subClusterFiles[i].length > 0) {
-      subClusters.push({
-        id: currentClusterId++,
-        files: subClusterFiles[i],
-        centroid: calculateCentroid(subClusterFiles[i].map((f) => f.embedding)),
-      });
-    }
-  }
-
-  return subClusters;
 }
 
 /**
@@ -479,9 +264,9 @@ export async function autoClusterFiles(
   autoOptions: AutoClusteringOptions = {},
 ): Promise<AutoClusteringResult> {
   const {
-    maxIterations = 3,
+    maxIterations = 5, // Increased from 3 to 5 for more refinement
     targetClusterCount,
-    maxClusterSizePercent = 0.05, // Reduced from 0.1 to 0.05 (5% of total files) for very strict clustering
+    maxClusterSizePercent = 0.15, // Increased from 0.05 to 0.15 for more realistic limits
     minClusterSizePercent = 0.02, // 2% of total files
     enableVerbose = false,
   } = autoOptions;
@@ -489,24 +274,25 @@ export async function autoClusterFiles(
   const totalFiles = files.length;
   let currentOptions: ClusteringOptions = {
     minClusterSize: 2,
-    similarityThreshold: 0.95,
-    maxClusterSize: 20, // Reduced from 25 to 20 for very strict initial clustering
+    similarityThreshold: 0.92, // Start with slightly lower threshold for better initial clustering
+    maxClusterSize: 30, // Start with moderate size limit
     ...initialOptions,
   };
 
   // Apply a hard cap on maxClusterSize based on the percentage limit
   const hardMaxClusterSize = Math.max(
-    20,
+    30, // Increased minimum from 20 to 30
     Math.floor(totalFiles * maxClusterSizePercent),
-  ); // Reduced minimum from 25 to 20
+  );
   currentOptions.maxClusterSize = Math.min(
-    currentOptions.maxClusterSize || 20,
+    currentOptions.maxClusterSize || 30,
     hardMaxClusterSize,
   );
 
   const adjustments: string[] = [];
   let bestClusters: Cluster[] = [];
   let bestScore = 0;
+  let bestClusterCount = 0;
 
   if (enableVerbose) {
     console.log(`🔄 Auto-clustering: Starting with ${totalFiles} files`);
@@ -539,19 +325,50 @@ export async function autoClusterFiles(
     );
     console.log(`📈 Size distribution:`, analysis.sizeDistribution);
 
+    // Show cluster count analysis
+    const clusterRatio = clusters.length / totalFiles;
+    console.log(
+      `📊 Cluster ratio: ${(clusterRatio * 100).toFixed(1)}% (${
+        clusters.length
+      }/${totalFiles})`,
+    );
+
+    // Show largest cluster info
+    const largestCluster = Math.max(...analysis.clusterSizes);
+    const largestClusterPercent = ((largestCluster / totalFiles) * 100).toFixed(
+      1,
+    );
+    console.log(
+      `📊 Largest cluster: ${largestCluster} files (${largestClusterPercent}%)`,
+    );
+
     // Keep track of best result
     if (score > bestScore) {
       bestScore = score;
       bestClusters = clusters;
+      bestClusterCount = clusters.length; // Track best cluster count
     }
 
     // Check if we should stop (good enough clustering)
-    if (score > 0.8) {
+    if (score > 0.85) {
+      // Increased from 0.8 to 0.85 for better quality
       if (enableVerbose) {
         console.log(
           `✅ Clustering quality score ${score.toFixed(
             3,
           )} is good enough, stopping`,
+        );
+      }
+      break;
+    }
+
+    // Additional stopping criteria: if we've found a good result and improvements are minimal
+    if (bestScore > 0.8 && score < bestScore + 0.02) {
+      if (enableVerbose) {
+        console.log(
+          `✅ Found good clustering (${bestScore.toFixed(
+            3,
+          )}) with minimal improvement, stopping`,
         );
       }
       break;
@@ -606,6 +423,27 @@ export async function autoClusterFiles(
       } clusters with score ${bestScore.toFixed(3)}`,
     );
     console.log(`📊 Final size distribution:`, finalAnalysis.sizeDistribution);
+
+    // Show final insights
+    const finalClusterRatio = bestClusters.length / totalFiles;
+    const finalLargestCluster = Math.max(...finalAnalysis.clusterSizes);
+    const finalLargestClusterPercent = (
+      (finalLargestCluster / totalFiles) *
+      100
+    ).toFixed(1);
+
+    console.log(
+      `📊 Final cluster ratio: ${(finalClusterRatio * 100).toFixed(1)}%`,
+    );
+    console.log(
+      `📊 Final largest cluster: ${finalLargestCluster} files (${finalLargestClusterPercent}%)`,
+    );
+
+    if (parseFloat(finalLargestClusterPercent) > 15) {
+      console.log(
+        `⚠️  Note: Large cluster detected (${finalLargestClusterPercent}%) - this may indicate natural grouping in your data`,
+      );
+    }
   }
 
   return {
@@ -633,11 +471,11 @@ function calculateClusteringScore(
   if (targetClusterCount) {
     const countDiff = Math.abs(totalClusters - targetClusterCount);
     const countScore = Math.max(0, 1 - countDiff / targetClusterCount);
-    score += countScore * 0.3;
+    score += countScore * 0.25; // Reduced weight from 0.3 to 0.25
   }
 
-  // Score based on size distribution balance
-  const idealSizes = [0.1, 0.2, 0.3, 0.2, 0.15, 0.05]; // Ideal distribution percentages
+  // Score based on size distribution balance - prefer more balanced distributions
+  const idealSizes = [0.15, 0.25, 0.3, 0.2, 0.08, 0.02]; // Adjusted ideal distribution
   const actualSizes = [
     sizeDistribution["1-5"] / totalClusters,
     sizeDistribution["6-10"] / totalClusters,
@@ -655,12 +493,30 @@ function calculateClusteringScore(
     );
   }
   distributionScore /= idealSizes.length;
-  score += distributionScore * 0.4;
+  score += distributionScore * 0.35; // Increased weight from 0.4 to 0.35
 
-  // Score based on avoiding extreme sizes
+  // Score based on avoiding extreme sizes - but be more lenient with large clusters
   const maxClusterPercent = Math.max(...clusterSizes) / totalFiles;
-  const sizePenalty = Math.max(0, maxClusterPercent - 0.05) * 6; // Penalty for clusters >5% (reduced from 10%) and increased multiplier from 4 to 6
-  score += Math.max(0, 1 - sizePenalty) * 0.3;
+  const sizePenalty = Math.max(0, maxClusterPercent - 0.2) * 2; // Penalty for clusters >20% (increased from 10%)
+  score += Math.max(0, 1 - sizePenalty) * 0.25; // Reduced weight from 0.3 to 0.25
+
+  // New: Score based on cluster count balance - prefer moderate number of clusters
+  const clusterCountRatio = totalClusters / totalFiles;
+  let countBalanceScore = 0;
+  if (clusterCountRatio < 0.01) {
+    // Too few clusters (less than 1% of files)
+    countBalanceScore = 0.3;
+  } else if (clusterCountRatio < 0.05) {
+    // Good range (1-5% of files)
+    countBalanceScore = 1.0;
+  } else if (clusterCountRatio < 0.1) {
+    // Acceptable range (5-10% of files)
+    countBalanceScore = 0.7;
+  } else {
+    // Too many clusters (more than 10% of files)
+    countBalanceScore = 0.4;
+  }
+  score += countBalanceScore * 0.15; // New weight for cluster count balance
 
   return Math.min(1, score);
 }
@@ -679,96 +535,102 @@ function adjustClusteringParameters(
   const newOptions = { ...currentOptions };
   const { totalClusters, sizeDistribution, clusterSizes } = analysis;
 
-  // Rule 1: Reduce max cluster size if one cluster is >5% of dataset (reduced from 10%)
+  // Rule 1: Smart handling of large clusters - adjust similarity threshold more intelligently
   const maxClusterSize = Math.max(...clusterSizes);
   const maxClusterPercent = maxClusterSize / totalFiles;
 
   if (maxClusterPercent > maxClusterSizePercent) {
-    // More aggressive reduction for giant clusters
-    const reductionFactor = maxClusterPercent > 0.15 ? 0.3 : 0.5; // More aggressive than before (was 0.3 and 0.6)
-    const newMaxSize = Math.max(
-      5,
-      Math.floor(maxClusterSize * reductionFactor),
-    );
-    newOptions.maxClusterSize = newMaxSize;
-
-    // Also reduce similarity threshold to be more strict
+    // Large cluster detected - use adaptive threshold adjustment
+    const thresholdReduction = Math.min(0.15, maxClusterPercent * 0.3); // Adaptive reduction
     if (newOptions.similarityThreshold) {
-      const thresholdReduction = maxClusterPercent > 0.15 ? 0.2 : 0.1; // More aggressive threshold reduction
       newOptions.similarityThreshold = Math.max(
-        0.7,
+        0.75, // Lower minimum threshold for better clustering
         newOptions.similarityThreshold - thresholdReduction,
       );
     }
+
+    // Don't aggressively reduce maxClusterSize - let the similarity threshold do the work
+    // This prevents creating too many small, noisy clusters
   }
 
-  // Rule 2: Increase min cluster size if many small clusters
+  // Rule 2: Adjust min cluster size based on overall file count and cluster distribution
   const smallClusterCount = sizeDistribution["1-5"] + sizeDistribution["6-10"];
   const smallClusterPercent = smallClusterCount / totalClusters;
 
-  if (smallClusterPercent > 0.7 && smallClusterCount > 30) {
+  if (smallClusterPercent > 0.6 && totalFiles > 100) {
+    // Too many small clusters in large datasets
     newOptions.minClusterSize = Math.min(
-      10,
-      (newOptions.minClusterSize || 2) + 1,
+      8, // Increased from 5 to 8
+      (newOptions.minClusterSize || 2) + 2, // More aggressive increase
+    );
+  } else if (smallClusterPercent < 0.2 && totalFiles > 200) {
+    // Too few small clusters in large datasets - might be over-clustering
+    newOptions.minClusterSize = Math.max(
+      2,
+      (newOptions.minClusterSize || 2) - 1,
     );
   }
 
-  // Rule 3: Adjust similarity threshold based on cluster count
+  // Rule 3: Smart similarity threshold adjustment based on cluster count and target
   if (targetClusterCount) {
     const currentRatio = totalClusters / totalFiles;
     const targetRatio = targetClusterCount / totalFiles;
 
-    if (currentRatio > targetRatio * 1.5) {
-      // Too many clusters, increase similarity threshold
+    if (currentRatio > targetRatio * 1.3) {
+      // Too many clusters, increase similarity threshold gradually
       newOptions.similarityThreshold = Math.min(
         0.98,
-        (newOptions.similarityThreshold || 0.95) + 0.02,
+        (newOptions.similarityThreshold || 0.92) + 0.015, // Reduced from 0.02 to 0.015
       );
-    } else if (currentRatio < targetRatio * 0.5) {
-      // Too few clusters, decrease similarity threshold
+    } else if (currentRatio < targetRatio * 0.7) {
+      // Too few clusters, decrease similarity threshold more aggressively
       newOptions.similarityThreshold = Math.max(
-        0.8,
-        (newOptions.similarityThreshold || 0.95) - 0.03,
+        0.75, // Lowered from 0.8 to 0.75
+        (newOptions.similarityThreshold || 0.92) - 0.025, // Increased from 0.03 to 0.025
       );
     }
   }
 
-  // Rule 4: Adjust max cluster size based on overall distribution
+  // Rule 4: Adaptive max cluster size adjustment based on dataset characteristics
   const largeClusterCount =
     sizeDistribution["51-100"] + sizeDistribution["100+"];
   if (largeClusterCount > 0 && newOptions.maxClusterSize) {
     const avgClusterSize = totalFiles / totalClusters;
-    if (avgClusterSize > newOptions.maxClusterSize * 0.8) {
-      // Clusters are too large on average
+    const currentMaxSize = newOptions.maxClusterSize;
+
+    if (avgClusterSize > currentMaxSize * 0.7) {
+      // Clusters are consistently large - increase max size gradually
+      newOptions.maxClusterSize = Math.min(
+        Math.floor(totalFiles * 0.25), // Cap at 25% of total files
+        Math.floor(currentMaxSize * 1.1), // Increase by 10%
+      );
+    } else if (avgClusterSize < currentMaxSize * 0.3 && totalClusters > 20) {
+      // Clusters are too small and we have many - decrease max size
       newOptions.maxClusterSize = Math.max(
-        10,
-        Math.floor(newOptions.maxClusterSize * 0.8),
+        15, // Minimum reasonable size
+        Math.floor(currentMaxSize * 0.9), // Decrease by 10%
       );
     }
   }
 
-  // Rule 5: Fine-tune based on size distribution
-  if (sizeDistribution["100+"] > 0) {
-    // Very large clusters exist, be more aggressive
-    newOptions.similarityThreshold = Math.max(
-      0.8,
-      (newOptions.similarityThreshold || 0.95) - 0.05,
-    );
-    newOptions.maxClusterSize = Math.max(
-      10,
-      Math.floor((newOptions.maxClusterSize || 50) * 0.6),
-    );
-  }
+  // Rule 5: Fine-tune based on overall clustering quality
+  const clusterCountRatio = totalClusters / totalFiles;
 
-  // Rule 6: Immediate action for extremely large clusters (>10% of total files, reduced from 20%)
-  if (maxClusterPercent > 0.1) {
-    // Emergency reduction for extremely large clusters
-    newOptions.maxClusterSize = Math.max(5, Math.floor(maxClusterSize * 0.25)); // More aggressive reduction (was 0.3)
+  if (clusterCountRatio < 0.005 && totalFiles > 500) {
+    // Very few clusters in large dataset - likely under-clustering
     if (newOptions.similarityThreshold) {
       newOptions.similarityThreshold = Math.max(
-        0.7,
-        newOptions.similarityThreshold - 0.25,
-      ); // More aggressive threshold reduction (was 0.2)
+        0.7, // Lower threshold to encourage more clusters
+        newOptions.similarityThreshold - 0.05,
+      );
+    }
+  } else if (clusterCountRatio > 0.15 && totalFiles > 200) {
+    // Too many clusters in large dataset - likely over-clustering
+    if (newOptions.similarityThreshold) {
+      newOptions.similarityThreshold = Math.min(
+        0.98,
+        newOptions.similarityThreshold + 0.03,
+      );
     }
   }
 
