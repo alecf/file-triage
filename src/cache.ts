@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { promises as fs } from "fs";
 import path from "path";
 import { hashFile } from "./hasher.js";
 
@@ -16,6 +17,11 @@ export interface CacheEntry {
 
 export interface CacheData {
   [fileName: string]: CacheEntry;
+}
+
+export interface CachedEmbeddingResult {
+  embedding: number[];
+  strategy: string;
 }
 
 export class EmbeddingCache {
@@ -90,9 +96,7 @@ export class EmbeddingCache {
       const fileName = path.basename(filePath);
 
       try {
-        const stats = await import("fs").then((fs) =>
-          fs.promises.stat(filePath),
-        );
+        const stats = await fs.stat(filePath);
 
         if (this.fastMode) {
           // Fast mode: only check stats (faster but less reliable)
@@ -187,7 +191,9 @@ export class EmbeddingCache {
   /**
    * Get cached embedding with optimized validation
    */
-  async getCachedEmbedding(filePath: string): Promise<number[] | null> {
+  async getCachedEmbedding(
+    filePath: string,
+  ): Promise<CachedEmbeddingResult | null> {
     const fileName = path.basename(filePath);
 
     const result = await this.client.execute({
@@ -203,15 +209,16 @@ export class EmbeddingCache {
 
     // If already validated and not stale, return immediately
     if (entry.is_validated && !entry.is_stale) {
-      return JSON.parse(entry.embedding);
+      return {
+        embedding: JSON.parse(entry.embedding),
+        strategy: entry.strategy,
+      };
     }
 
     // If not validated, do validation
     if (!entry.is_validated) {
       try {
-        const stats = await import("fs").then((fs) =>
-          fs.promises.stat(filePath),
-        );
+        const stats = await fs.stat(filePath);
 
         if (this.fastMode) {
           // Fast mode: only check stats
@@ -223,7 +230,10 @@ export class EmbeddingCache {
               sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 0 WHERE file_name = ?`,
               args: [fileName],
             });
-            return JSON.parse(entry.embedding);
+            return {
+              embedding: JSON.parse(entry.embedding),
+              strategy: entry.strategy,
+            };
           } else {
             await this.client.execute({
               sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 1 WHERE file_name = ?`,
@@ -243,7 +253,10 @@ export class EmbeddingCache {
                 sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 0 WHERE file_name = ?`,
                 args: [fileName],
               });
-              return JSON.parse(entry.embedding);
+              return {
+                embedding: JSON.parse(entry.embedding),
+                strategy: entry.strategy,
+              };
             } else {
               // Large files: verify hash
               if (entry.hash) {
@@ -254,7 +267,10 @@ export class EmbeddingCache {
                       sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 0 WHERE file_name = ?`,
                       args: [fileName],
                     });
-                    return JSON.parse(entry.embedding);
+                    return {
+                      embedding: JSON.parse(entry.embedding),
+                      strategy: entry.strategy,
+                    };
                   } else {
                     await this.client.execute({
                       sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 1 WHERE file_name = ?`,
@@ -268,7 +284,10 @@ export class EmbeddingCache {
                     sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 0 WHERE file_name = ?`,
                     args: [fileName],
                   });
-                  return JSON.parse(entry.embedding);
+                  return {
+                    embedding: JSON.parse(entry.embedding),
+                    strategy: entry.strategy,
+                  };
                 }
               } else {
                 // No hash available, trust stats
@@ -276,7 +295,10 @@ export class EmbeddingCache {
                   sql: `UPDATE cache_entries SET is_validated = 1, is_stale = 0 WHERE file_name = ?`,
                   args: [fileName],
                 });
-                return JSON.parse(entry.embedding);
+                return {
+                  embedding: JSON.parse(entry.embedding),
+                  strategy: entry.strategy,
+                };
               }
             }
           } else {
@@ -305,8 +327,8 @@ export class EmbeddingCache {
    */
   async getCachedEmbeddings(
     filePaths: string[],
-  ): Promise<Map<string, number[]>> {
-    const results = new Map<string, number[]>();
+  ): Promise<Map<string, CachedEmbeddingResult>> {
+    const results = new Map<string, CachedEmbeddingResult>();
 
     // Batch validate all cache entries first
     await this.batchValidateCacheEntries(filePaths);
@@ -322,7 +344,10 @@ export class EmbeddingCache {
 
       if (result.rows.length > 0) {
         const entry = result.rows[0];
-        results.set(filePath, JSON.parse(entry.embedding));
+        results.set(filePath, {
+          embedding: JSON.parse(entry.embedding),
+          strategy: entry.strategy,
+        });
       }
     }
 
@@ -337,7 +362,7 @@ export class EmbeddingCache {
     const fileName = path.basename(filePath);
 
     try {
-      const stats = await import("fs").then((fs) => fs.promises.stat(filePath));
+      const stats = await fs.stat(filePath);
       const hash = await hashFile(filePath);
 
       // Use UPSERT to handle both insert and update cases
@@ -408,11 +433,10 @@ export class EmbeddingCache {
     });
 
     // Get database file size
-    const fs = await import("fs");
     const dbPath = this.getDbPath();
     let cacheSize = 0;
     try {
-      const stats = await fs.promises.stat(dbPath);
+      const stats = await fs.stat(dbPath);
       cacheSize = stats.size;
     } catch (error) {
       // Database file might not exist yet

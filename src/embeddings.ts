@@ -4,7 +4,8 @@ import OpenAI from "openai";
 import pLimit from "p-limit";
 import path from "path";
 import { promisify } from "util";
-import { generateFileInfoText } from "./fileinfo.js";
+import { EmbeddingCache } from "./cache.js";
+import { generateFileInfo, generateFileInfoText } from "./fileinfo.js";
 
 const execAsync = promisify(exec);
 
@@ -20,12 +21,16 @@ interface ToolInfo {
 /**
  * Service for extracting text content from various file types and generating embeddings
  * Supports dynamic detection and use of command line tools for different file formats
+ * Now includes integrated caching to avoid re-embedding files that are already cached
  */
 export class EmbeddingService {
   private openai: OpenAI;
   private availableTools: Map<string, ToolInfo> = new Map();
   private toolDetectionDone = false;
   private verboseToolLogging = false;
+  private cache: EmbeddingCache | null = null;
+  private cacheDirectory: string | null = null;
+  private useFastCache: boolean = true;
 
   constructor(apiKey?: string, verboseToolLogging = false) {
     this.openai = new OpenAI({
@@ -35,7 +40,54 @@ export class EmbeddingService {
   }
 
   /**
-   * Generate embeddings for multiple files
+   * Initialize the cache for a specific directory
+   * This must be called before using the service to enable caching
+   */
+  async initializeCache(
+    directory: string,
+    useFastCache: boolean = true,
+  ): Promise<void> {
+    this.cacheDirectory = directory;
+    this.useFastCache = useFastCache;
+    this.cache = new EmbeddingCache(directory, useFastCache);
+    await this.cache.initialize();
+  }
+
+  /**
+   * Get cache statistics if cache is initialized
+   */
+  async getCacheStats(): Promise<{
+    totalEntries: number;
+    validEntries: number;
+    staleEntries: number;
+    cacheSize: number;
+  } | null> {
+    if (!this.cache) {
+      return null;
+    }
+    return await this.cache.getCacheStats();
+  }
+
+  /**
+   * Clean up stale cache entries
+   */
+  async cleanupCache(): Promise<void> {
+    if (this.cache) {
+      await this.cache.cleanupStaleEntries();
+    }
+  }
+
+  /**
+   * Close the cache connection
+   */
+  async closeCache(): Promise<void> {
+    if (this.cache) {
+      await this.cache.close();
+    }
+  }
+
+  /**
+   * Generate embeddings for multiple files with integrated caching
    */
   async getFileEmbeddings(filePaths: string[]): Promise<
     Array<{
@@ -43,6 +95,7 @@ export class EmbeddingService {
       embedding: number[];
       strategy: string;
       error?: string;
+      fromCache?: boolean;
     }>
   > {
     // Create a limiter that allows max 100 concurrent operations
@@ -57,6 +110,7 @@ export class EmbeddingService {
             filePath,
             embedding: result.embedding,
             strategy: result.strategy,
+            fromCache: result.fromCache,
           };
         } catch (error) {
           const errorMessage =
@@ -66,6 +120,7 @@ export class EmbeddingService {
             embedding: [],
             strategy: "error",
             error: errorMessage,
+            fromCache: false,
           };
         }
       }),
@@ -78,18 +133,29 @@ export class EmbeddingService {
 
   /**
    * Generate an embedding for a file by extracting its content using the unified file info system
+   * Now includes integrated caching to avoid re-embedding files that are already cached
    */
   async getFileEmbedding(
     filePath: string,
-  ): Promise<{ embedding: number[]; strategy: string }> {
+  ): Promise<{ embedding: number[]; strategy: string; fromCache: boolean }> {
     try {
+      // Check cache first if available
+      if (this.cache) {
+        const cachedResult = await this.cache.getCachedEmbedding(filePath);
+        if (cachedResult) {
+          return {
+            embedding: cachedResult.embedding,
+            strategy: cachedResult.strategy,
+            fromCache: true,
+          };
+        }
+      }
+
       // Use the unified file info system to get canonical content
       const content = await generateFileInfoText(filePath);
 
-      // Get the strategy from the file info (we'll extract it from the content)
-      const fileInfo = await import("./fileinfo.js").then((m) =>
-        m.generateFileInfo(filePath),
-      );
+      // Get the strategy from the file info
+      const fileInfo = await generateFileInfo(filePath);
 
       const response = await this.openai.embeddings.create({
         model: "text-embedding-3-small",
@@ -97,14 +163,39 @@ export class EmbeddingService {
         dimensions: 512,
       });
 
+      const embedding = response.data[0].embedding;
+
+      // Cache the result if cache is available
+      if (this.cache) {
+        await this.cache.setCachedEmbedding(
+          filePath,
+          embedding,
+          fileInfo.strategy,
+        );
+      }
+
       return {
-        embedding: response.data[0].embedding,
+        embedding,
         strategy: fileInfo.strategy,
+        fromCache: false,
       };
     } catch (error) {
       console.error(`Error getting embedding for ${filePath}:`, error);
       throw error;
     }
+  }
+
+  /**
+   * Batch get cached embeddings for multiple files
+   * This is useful for checking what's already cached before processing
+   */
+  async getCachedEmbeddings(
+    filePaths: string[],
+  ): Promise<Map<string, { embedding: number[]; strategy: string }>> {
+    if (!this.cache) {
+      return new Map();
+    }
+    return await this.cache.getCachedEmbeddings(filePaths);
   }
 
   /**

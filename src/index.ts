@@ -5,7 +5,6 @@ import { program } from "commander";
 import { promises as fs } from "fs";
 import ora from "ora";
 import path from "path";
-import { EmbeddingCache } from "./cache.js";
 import {
   analyzeClusteringResults,
   autoClusterFiles,
@@ -17,12 +16,8 @@ import { triageClusters } from "./interactive.js";
 async function processDirectory(
   dirPath: string,
   embeddingService: EmbeddingService,
-  useFastCache: boolean,
 ): Promise<FileItem[]> {
   console.log(chalk.blue(`Processing directory: ${dirPath}`));
-
-  const cache = new EmbeddingCache(dirPath, useFastCache);
-  await cache.initialize();
 
   const files = await fs.readdir(dirPath);
   const fileItems: FileItem[] = [];
@@ -49,10 +44,6 @@ async function processDirectory(
     return fileItems;
   }
 
-  // Batch get all cached embeddings first
-  const filePaths = validFiles.map((f) => f.filePath);
-  const cachedEmbeddings = await cache.getCachedEmbeddings(filePaths);
-
   // Create progress spinner for file processing
   const spinner = ora(`Processing files...`).start();
   let processedCount = 0;
@@ -60,51 +51,48 @@ async function processDirectory(
   let newEmbeddingCount = 0;
   let errorCount = 0;
 
-  for (const { file, filePath, stats } of validFiles) {
-    spinner.text = `Processing ${file} (${processedCount + 1}/${
-      validFiles.length
-    })`;
+  try {
+    spinner.text = `Getting embeddings for ${validFiles.length} files...`;
 
-    try {
-      // Check if we have a cached embedding
-      let embedding = cachedEmbeddings.get(filePath);
-      let strategy = "";
+    // Use the batch method with concurrency limits instead of individual calls
+    const filePaths = validFiles.map((f) => f.filePath);
+    const results = await embeddingService.getFileEmbeddings(filePaths);
 
-      if (!embedding) {
-        spinner.text = `Getting embedding for ${file}...`;
-        try {
-          const result = await embeddingService.getFileEmbedding(filePath);
-          embedding = result.embedding;
-          strategy = result.strategy;
-          await cache.setCachedEmbedding(filePath, embedding, strategy);
-          newEmbeddingCount++;
-          spinner.text = `✓ Cached embedding for ${file} (${strategy})`;
-        } catch (error) {
-          errorCount++;
-          spinner.text = `✗ Failed to get embedding for ${file}: ${error}`;
-          continue;
-        }
-      } else {
+    // Process the batch results
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      const { file, stats } = validFiles[i];
+
+      if (result.error) {
+        errorCount++;
+        spinner.text = `✗ Failed to get embedding for ${file}: ${result.error}`;
+        continue;
+      }
+
+      if (result.fromCache) {
         cachedCount++;
         spinner.text = `✓ Using cached embedding for ${file}`;
+      } else {
+        newEmbeddingCount++;
+        spinner.text = `✓ Generated new embedding for ${file} (${result.strategy})`;
       }
 
       fileItems.push({
-        filePath,
-        embedding,
+        filePath: result.filePath,
+        embedding: result.embedding,
         size: stats.size,
         lastModified: stats.mtime,
       });
 
       processedCount++;
-    } catch (error) {
-      errorCount++;
-      spinner.text = `Error processing ${file}: ${error}`;
     }
+  } catch (error) {
+    errorCount++;
+    spinner.text = `✗ Failed to process files: ${error}`;
   }
 
   // Clean up stale cache entries
-  await cache.cleanupStaleEntries();
+  await embeddingService.cleanupCache();
 
   // Show final results
   if (errorCount === 0) {
@@ -162,6 +150,9 @@ async function main() {
           process.exit(1);
         }
 
+        // Create embedding service
+        const embeddingService = new EmbeddingService(apiKey, false); // verboseTools always false
+
         // Handle cache stats option
         if (options.cacheStats) {
           if (directories.length === 0) {
@@ -174,21 +165,27 @@ async function main() {
           }
 
           const dir = directories[0];
-          const cache = new EmbeddingCache(dir, options.strictCache !== true);
-          await cache.initialize();
-
-          const stats = await cache.getCacheStats();
-          console.log(chalk.blue.bold(`Cache Statistics for: ${dir}`));
-          console.log(chalk.gray(`Total entries: ${stats.totalEntries}`));
-          console.log(chalk.gray(`Valid entries: ${stats.validEntries}`));
-          console.log(chalk.gray(`Stale entries: ${stats.staleEntries}`));
-          console.log(
-            chalk.gray(
-              `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
-            ),
+          await embeddingService.initializeCache(
+            dir,
+            options.strictCache !== true,
           );
 
-          await cache.close();
+          const stats = await embeddingService.getCacheStats();
+          if (stats) {
+            console.log(chalk.blue.bold(`Cache Statistics for: ${dir}`));
+            console.log(chalk.gray(`Total entries: ${stats.totalEntries}`));
+            console.log(chalk.gray(`Valid entries: ${stats.validEntries}`));
+            console.log(chalk.gray(`Stale entries: ${stats.staleEntries}`));
+            console.log(
+              chalk.gray(
+                `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
+              ),
+            );
+          } else {
+            console.log(chalk.yellow("Cache not initialized"));
+          }
+
+          await embeddingService.closeCache();
           return;
         }
 
@@ -202,34 +199,41 @@ async function main() {
           }
 
           const dir = directories[0];
-          const cache = new EmbeddingCache(dir, options.strictCache !== true);
-          await cache.initialize();
-
-          console.log(chalk.blue(`Cleaning up stale cache entries in: ${dir}`));
-          await cache.cleanupStaleEntries();
-
-          const stats = await cache.getCacheStats();
-          console.log(chalk.green(`Cleanup completed!`));
-          console.log(chalk.gray(`Remaining entries: ${stats.totalEntries}`));
-          console.log(
-            chalk.gray(
-              `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
-            ),
+          await embeddingService.initializeCache(
+            dir,
+            options.strictCache !== true,
           );
 
-          await cache.close();
+          console.log(chalk.blue(`Cleaning up stale cache entries in: ${dir}`));
+          await embeddingService.cleanupCache();
+
+          const stats = await embeddingService.getCacheStats();
+          if (stats) {
+            console.log(chalk.green(`Cleanup completed!`));
+            console.log(chalk.gray(`Remaining entries: ${stats.totalEntries}`));
+            console.log(
+              chalk.gray(
+                `Cache size: ${(stats.cacheSize / 1024 / 1024).toFixed(2)} MB`,
+              ),
+            );
+          }
+
+          await embeddingService.closeCache();
           return;
         }
 
         // Validate directories
         for (const dir of directories) {
-          if (
-            !(await fs
-              .stat(dir)
-              .then((s) => s.isDirectory())
-              .catch(() => false))
-          ) {
-            console.error(chalk.red(`Error: ${dir} is not a valid directory`));
+          try {
+            const stats = await fs.stat(dir);
+            if (!stats.isDirectory()) {
+              console.error(
+                chalk.red(`Error: ${dir} is not a valid directory`),
+              );
+              process.exit(1);
+            }
+          } catch (error) {
+            console.error(chalk.red(`Error: ${dir} is not accessible`));
             process.exit(1);
           }
         }
@@ -237,9 +241,6 @@ async function main() {
         const targetClusters = options.targetClusters
           ? parseInt(options.targetClusters)
           : undefined;
-
-        // Create embedding service
-        const embeddingService = new EmbeddingService(apiKey, false); // verboseTools always false
 
         console.log(chalk.blue.bold("File Triage Tool"));
         console.log(
@@ -282,12 +283,20 @@ async function main() {
             directories.length
           }: ${path.basename(dir)}`;
 
+          // Initialize cache for this directory
+          await embeddingService.initializeCache(
+            path.resolve(dir),
+            options.strictCache !== true,
+          );
+
           const dirFiles = await processDirectory(
             path.resolve(dir),
             embeddingService,
-            options.strictCache !== true,
           );
           allFiles.push(...dirFiles);
+
+          // Close cache for this directory before moving to next
+          await embeddingService.closeCache();
         }
 
         overallSpinner.succeed(
