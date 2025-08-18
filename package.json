@@ -21,6 +21,7 @@
     "openai": "^4.67.3",
     "ora": "^8.0.1",
     "p-limit": "^7.0.0",
+    "tiktoken": "^1.0.22",
     "xxhash-wasm": "^1.0.2"
   },
   "devDependencies": {

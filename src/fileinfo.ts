@@ -2,9 +2,88 @@ import chalk from "chalk";
 import { exec } from "child_process";
 import { promises as fs, Stats } from "fs";
 import path from "path";
+import { encoding_for_model } from "tiktoken";
 import { promisify } from "util";
 
 const execAsync = promisify(exec);
+
+// OpenAI embedding model token limits
+const EMBEDDING_MODEL_MAX_TOKENS = 8192;
+const EMBEDDING_MODEL_SAFETY_MARGIN = 100; // Leave some buffer
+const EMBEDDING_MODEL_TARGET_TOKENS =
+  EMBEDDING_MODEL_MAX_TOKENS - EMBEDDING_MODEL_SAFETY_MARGIN;
+
+/**
+ * Count tokens in text using tiktoken
+ */
+function countTokens(text: string): number {
+  try {
+    // Use cl100k_base encoding which is used by text-embedding-3-small
+    const encoder = encoding_for_model("text-embedding-3-small");
+    const tokens = encoder.encode(text);
+    encoder.free();
+    return tokens.length;
+  } catch (error) {
+    // Fallback: rough estimation (1 token ≈ 4 characters for English text)
+    return Math.ceil(text.length / 4);
+  }
+}
+
+/**
+ * Truncate text to fit within token limit while preserving meaningful content
+ */
+function truncateToTokenLimit(
+  text: string,
+  maxTokens: number = EMBEDDING_MODEL_TARGET_TOKENS,
+): {
+  truncatedText: string;
+  isTruncated: boolean;
+  originalTokens: number;
+  truncatedTokens: number;
+} {
+  const originalTokens = countTokens(text);
+
+  if (originalTokens <= maxTokens) {
+    return {
+      truncatedText: text,
+      isTruncated: false,
+      originalTokens,
+      truncatedTokens: originalTokens,
+    };
+  }
+
+  // Binary search to find the right truncation point
+  let left = 0;
+  let right = text.length;
+  let bestTruncatedText = "";
+  let bestTokenCount = 0;
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const truncatedText = text.substring(0, mid);
+    const tokenCount = countTokens(truncatedText);
+
+    if (tokenCount <= maxTokens) {
+      bestTruncatedText = truncatedText;
+      bestTokenCount = tokenCount;
+      left = mid + 1;
+    } else {
+      right = mid - 1;
+    }
+  }
+
+  // Add truncation indicator
+  const finalText =
+    bestTruncatedText + "\n\n... (content truncated to fit token limit)";
+  const finalTokenCount = countTokens(finalText);
+
+  return {
+    truncatedText: finalText,
+    isTruncated: true,
+    originalTokens,
+    truncatedTokens: finalTokenCount,
+  };
+}
 
 interface ToolInfo {
   name: string;
@@ -37,14 +116,20 @@ export async function generateFileInfo(filePath: string): Promise<FileInfo> {
 
   try {
     if (isTextFile(ext)) {
-      // For text files, check size and truncate if necessary
+      // For text files, use token-based truncation for embeddings
       const fileContent = await fs.readFile(filePath, "utf-8");
-      // Truncate very long content to 1MB for embeddings
-      const isTruncated = fileContent.length > 1024 * 1024;
-      content = isTruncated
-        ? fileContent.substring(0, 1024 * 1024) + "..."
-        : fileContent;
-      strategy = isTruncated ? "text-truncated" : "text";
+      const truncationResult = truncateToTokenLimit(fileContent);
+
+      content = truncationResult.truncatedText;
+      strategy = truncationResult.isTruncated ? "text-truncated" : "text";
+
+      if (truncationResult.isTruncated) {
+        console.log(
+          chalk.yellow(
+            `⚠️  File ${filename} truncated: ${truncationResult.originalTokens} → ${truncationResult.truncatedTokens} tokens`,
+          ),
+        );
+      }
     } else {
       // For non-text files, let the extraction function handle size limits
       const result = await extractNonTextContent(filePath, ext, stats);
@@ -69,15 +154,29 @@ export async function generateFileInfo(filePath: string): Promise<FileInfo> {
 
 /**
  * Generate file info text in the canonical format for embeddings
+ * Ensures the total text fits within token limits
  */
 export async function generateFileInfoText(filePath: string): Promise<string> {
   const fileInfo = await generateFileInfo(filePath);
 
-  return `Filename: ${fileInfo.filename}
+  const combinedText = `Filename: ${fileInfo.filename}
 Size: ${fileInfo.size} bytes
 Last Modified: ${fileInfo.lastModified.toISOString()}
 File content:
 ${fileInfo.content}`;
+
+  // Apply token-based truncation to the combined text
+  const truncationResult = truncateToTokenLimit(combinedText);
+
+  if (truncationResult.isTruncated) {
+    console.log(
+      chalk.yellow(
+        `⚠️  Combined text for ${fileInfo.filename} truncated: ${truncationResult.originalTokens} → ${truncationResult.truncatedTokens} tokens`,
+      ),
+    );
+  }
+
+  return truncationResult.truncatedText;
 }
 
 /**
@@ -352,19 +451,21 @@ async function executeStrategy(
     });
 
     if (stdout && stdout.trim()) {
-      // Truncate very long output to avoid token limits
+      // Use token-based truncation for tool output
       const output = stdout.trim();
-      const isTruncated = output.length > 6000;
-      const truncatedOutput = isTruncated
-        ? output.substring(0, 6000) + "..."
-        : output;
+      const fullContent = `${strategy.description}:\n${output}`;
+
+      const truncationResult = truncateToTokenLimit(fullContent);
 
       // Apply validation if the tool has a validation function
-      if (strategy.validation && !strategy.validation(truncatedOutput)) {
+      if (
+        strategy.validation &&
+        !strategy.validation(truncationResult.truncatedText)
+      ) {
         return null; // Validation failed
       }
 
-      return `${strategy.description}:\n${truncatedOutput}`;
+      return truncationResult.truncatedText;
     }
 
     return null;

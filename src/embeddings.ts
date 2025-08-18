@@ -3,11 +3,18 @@ import { promises as fs } from "fs";
 import OpenAI from "openai";
 import pLimit from "p-limit";
 import path from "path";
+import { encoding_for_model } from "tiktoken";
 import { promisify } from "util";
 import { EmbeddingCache } from "./cache.js";
 import { generateFileInfo, generateFileInfoText } from "./fileinfo.js";
 
 const execAsync = promisify(exec);
+
+// OpenAI embedding model token limits
+const EMBEDDING_MODEL_MAX_TOKENS = 8192;
+const EMBEDDING_MODEL_SAFETY_MARGIN = 100; // Leave some buffer
+const EMBEDDING_MODEL_TARGET_TOKENS =
+  EMBEDDING_MODEL_MAX_TOKENS - EMBEDDING_MODEL_SAFETY_MARGIN;
 
 interface ToolInfo {
   name: string;
@@ -87,6 +94,22 @@ export class EmbeddingService {
   }
 
   /**
+   * Count tokens in text using tiktoken
+   */
+  private countTokens(text: string): number {
+    try {
+      // Use cl100k_base encoding which is used by text-embedding-3-small
+      const encoder = encoding_for_model("text-embedding-3-small");
+      const tokens = encoder.encode(text);
+      encoder.free();
+      return tokens.length;
+    } catch (error) {
+      // Fallback: rough estimation (1 token ≈ 4 characters for English text)
+      return Math.ceil(text.length / 4);
+    }
+  }
+
+  /**
    * Generate embeddings for multiple files with integrated caching
    */
   async getFileEmbeddings(filePaths: string[]): Promise<
@@ -153,6 +176,16 @@ export class EmbeddingService {
 
       // Use the unified file info system to get canonical content
       const content = await generateFileInfoText(filePath);
+
+      // Final safety check: ensure content fits within token limits
+      const tokenCount = this.countTokens(content);
+      if (tokenCount > EMBEDDING_MODEL_MAX_TOKENS) {
+        console.warn(
+          `⚠️  Content for ${path.basename(
+            filePath,
+          )} still exceeds token limit: ${tokenCount} tokens. This may cause embedding to fail.`,
+        );
+      }
 
       // Get the strategy from the file info
       const fileInfo = await generateFileInfo(filePath);
