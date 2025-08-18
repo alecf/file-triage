@@ -255,12 +255,18 @@ async function extractNonTextContent(
   const fileName = path.basename(filePath);
 
   // First, try to detect file type using the `file` command
-  let detectedType = ext;
+  let detectedType = "";
   try {
     const { stdout } = await execAsync(`file "${filePath}"`);
-    detectedType = stdout.toLowerCase();
+    detectedType = stdout.trim();
+
+    // Check if 'file' command couldn't determine the type
+    if (detectedType.endsWith(": data") || detectedType.includes(": data")) {
+      detectedType = "data"; // Mark as unknown type
+    }
   } catch (error) {
-    // If `file` command fails, fall back to extension
+    // If `file` command fails, mark as unknown type
+    detectedType = "data";
   }
 
   // Check if this is a file type where size matters for content extraction
@@ -319,7 +325,7 @@ async function extractNonTextContent(
 /**
  * Get strategies for processing a specific file type
  */
-async function getStrategiesForFile(
+export async function getStrategiesForFile(
   filePath: string,
   ext: string,
   detectedType: string,
@@ -332,8 +338,47 @@ async function getStrategiesForFile(
 
   const tools = global.availableTools!;
 
+  // Parse the detected type from the 'file' command output
+  // The output format is typically: "filename: type description"
+  let parsedType = "";
+  if (detectedType && detectedType !== ext) {
+    // Extract the type description after the colon
+    const colonIndex = detectedType.indexOf(":");
+    if (colonIndex !== -1) {
+      parsedType = detectedType
+        .substring(colonIndex + 1)
+        .trim()
+        .toLowerCase();
+    } else {
+      parsedType = detectedType.toLowerCase();
+    }
+  }
+
+  // If 'file' command couldn't determine type (returns "data"), be very conservative
+  if (parsedType === "data" || parsedType === "") {
+    // Only use extension-based detection as a last resort, and be conservative
+    if (isTextFile(ext)) {
+      // For known text files, we can be confident
+      if (tools.has("cat")) {
+        strategies.push(tools.get("cat")!);
+      }
+      if (tools.has("head")) {
+        strategies.push(tools.get("head")!);
+      }
+    } else {
+      // For unknown binary files, only use exiftool for metadata, no content extraction
+      if (tools.has("exiftool")) {
+        strategies.push(tools.get("exiftool")!);
+      }
+      // Don't add strings/hexdump here - only as absolute last resort
+      return strategies;
+    }
+    return strategies;
+  }
+
+  // Use the parsed type from 'file' command as primary source of truth
   // PDF strategies
-  if (ext === ".pdf" || detectedType.includes("pdf")) {
+  if (parsedType.includes("pdf") || ext === ".pdf") {
     if (tools.has("pdfinfo")) {
       strategies.push(tools.get("pdfinfo")!);
     }
@@ -342,21 +387,29 @@ async function getStrategiesForFile(
     }
   }
 
-  // Image strategies
-  if (isImageFile(ext) || detectedType.includes("image")) {
+  // Image strategies - metadata tools first, then strings as last resort
+  if (parsedType.includes("image") || isImageFile(ext)) {
     if (tools.has("identify")) {
       strategies.push(tools.get("identify")!);
     }
     if (tools.has("gm-identify")) {
       strategies.push(tools.get("gm-identify")!);
     }
+    if (tools.has("exiftool")) {
+      strategies.push(tools.get("exiftool")!);
+    }
+    // Add strings as last resort for images (as per memory rule)
+    if (tools.has("strings")) {
+      strategies.push(tools.get("strings")!);
+    }
   }
 
   // Document strategies
   if (
+    parsedType.includes("microsoft word") ||
+    parsedType.includes("word") ||
     ext === ".doc" ||
-    ext === ".docx" ||
-    detectedType.includes("microsoft word")
+    ext === ".docx"
   ) {
     if (tools.has("antiword")) {
       strategies.push(tools.get("antiword")!);
@@ -367,59 +420,157 @@ async function getStrategiesForFile(
   }
 
   // Spreadsheet strategies
-  if (ext === ".xlsx" || ext === ".xls" || detectedType.includes("excel")) {
+  if (
+    parsedType.includes("excel") ||
+    parsedType.includes("spreadsheet") ||
+    ext === ".xlsx" ||
+    ext === ".xls"
+  ) {
     if (tools.has("xlsx2csv")) {
       strategies.push(tools.get("xlsx2csv")!);
     }
   }
 
   // Archive strategies
-  if (ext === ".zip" || detectedType.includes("zip")) {
+  if (
+    parsedType.includes("zip") ||
+    parsedType.includes("archive") ||
+    ext === ".zip"
+  ) {
     if (tools.has("unzip")) {
       strategies.push(tools.get("unzip")!);
     }
   }
 
   if (
+    parsedType.includes("tar") ||
+    parsedType.includes("archive") ||
     ext === ".tar" ||
     ext === ".tar.gz" ||
-    ext === ".tgz" ||
-    detectedType.includes("tar")
+    ext === ".tgz"
   ) {
     if (tools.has("tar")) {
       strategies.push(tools.get("tar")!);
     }
   }
 
+  // Disk image and package strategies
+  if (
+    parsedType.includes("disk image") ||
+    parsedType.includes("dmg") ||
+    parsedType.includes("pkg") ||
+    ext === ".dmg" ||
+    ext === ".pkg" ||
+    ext === ".iso"
+  ) {
+    if (tools.has("exiftool")) {
+      strategies.push(tools.get("exiftool")!);
+    }
+    // Don't add strings for disk images - they often contain binary garbage
+  }
+
   // Media strategies
   if (
+    parsedType.includes("video") ||
+    parsedType.includes("audio") ||
     isAudioFile(ext) ||
-    isVideoFile(ext) ||
-    detectedType.includes("video") ||
-    detectedType.includes("audio")
+    isVideoFile(ext)
   ) {
     if (tools.has("ffprobe")) {
       strategies.push(tools.get("ffprobe")!);
     }
+    if (tools.has("exiftool")) {
+      strategies.push(tools.get("exiftool")!);
+    }
   }
 
-  // Generic metadata extraction
-  if (tools.has("exiftool")) {
+  // Generic metadata extraction - add for most file types
+  if (tools.has("exiftool") && !strategies.some((s) => s.name === "exiftool")) {
     strategies.push(tools.get("exiftool")!);
   }
 
-  // Binary file analysis
-  if (tools.has("strings")) {
-    strategies.push(tools.get("strings")!);
+  // Compressed file strategies
+  if (
+    parsedType.includes("gzip") ||
+    parsedType.includes("bzip2") ||
+    parsedType.includes("xz") ||
+    ext === ".gz" ||
+    ext === ".bz2" ||
+    ext === ".xz" ||
+    filePath.includes(".gz") ||
+    filePath.includes(".bz2") ||
+    filePath.includes(".xz")
+  ) {
+    if (tools.has("gunzip")) {
+      strategies.push(tools.get("gunzip")!);
+    }
   }
 
-  // Fallback strategies for binary files
-  if (tools.has("hexdump")) {
-    strategies.push(tools.get("hexdump")!);
+  // Zlib and other compressed data strategies
+  if (parsedType.includes("zlib") || parsedType.includes("compressed")) {
+    // For compressed data, just use metadata tools - don't try to extract content
+    // The strings tool often produces garbage for compressed files
   }
 
-  if (tools.has("od")) {
-    strategies.push(tools.get("od")!);
+  // Plain text file strategies - only for files confirmed to be text
+  if (
+    parsedType.includes("text") ||
+    parsedType.includes("ascii") ||
+    parsedType.includes("utf-8") ||
+    parsedType.includes("csv") ||
+    isTextFile(ext)
+  ) {
+    if (tools.has("cat")) {
+      strategies.push(tools.get("cat")!);
+    }
+    if (tools.has("head")) {
+      strategies.push(tools.get("head")!);
+    }
+  }
+
+  // Certificate and key file strategies
+  if (
+    parsedType.includes("pem") ||
+    parsedType.includes("certificate") ||
+    parsedType.includes("private key") ||
+    ext === ".pem" ||
+    ext === ".crt" ||
+    ext === ".key" ||
+    ext === ".cer"
+  ) {
+    // For security reasons, only extract metadata, not content
+    if (tools.has("exiftool")) {
+      strategies.push(tools.get("exiftool")!);
+    }
+    // Add strings with very limited output for certificate files
+    if (tools.has("strings")) {
+      strategies.push(tools.get("strings")!);
+    }
+  }
+
+  // Add fallback tools for binary files that don't have enough strategies
+  // This ensures we can extract some content from most binary files
+  if (
+    strategies.length === 0 ||
+    (strategies.length === 1 && strategies[0].name === "exiftool")
+  ) {
+    // For binary files, just use hexdump as fallback - strings often produces garbage
+    if (tools.has("hexdump") && !strategies.some((s) => s.name === "hexdump")) {
+      strategies.push(tools.get("hexdump")!);
+    }
+  }
+
+  // If we still have no strategies, create a basic metadata strategy
+  if (strategies.length === 0) {
+    // This will be handled in the executeStrategy function as a special case
+    const basicStrategy: ToolInfo = {
+      name: "basic-metadata",
+      command: "echo",
+      args: ["basic-file-info"],
+      description: "Basic file metadata and information",
+      priority: 0,
+    };
+    strategies.push(basicStrategy);
   }
 
   // Sort strategies by priority (higher numbers = higher priority)
@@ -431,11 +582,22 @@ async function getStrategiesForFile(
 /**
  * Execute a strategy to extract content from a file
  */
-async function executeStrategy(
+export async function executeStrategy(
   strategy: ToolInfo,
   filePath: string,
 ): Promise<string | null> {
   try {
+    // Handle basic metadata strategy specially
+    if (strategy.name === "basic-metadata") {
+      const stats = await fs.stat(filePath);
+      const ext = path.extname(filePath);
+      const fileName = path.basename(filePath);
+      const fileSize = formatFileSize(stats.size);
+      const lastModified = stats.mtime.toISOString();
+
+      return `File: ${fileName}, Extension: ${ext}, Size: ${fileSize}, Last Modified: ${lastModified}`;
+    }
+
     const args = strategy.args.map((arg) =>
       arg === "FILEPATH" ? `"${filePath}"` : arg,
     );
@@ -447,7 +609,7 @@ async function executeStrategy(
 
     const { stdout, stderr } = await execAsync(command, {
       timeout: isLargeFile ? 30000 : 10000, // 30s for large files, 10s for normal
-      maxBuffer: isLargeFile ? 10 * 1024 * 1024 : 1024 * 1024, // 10MB for large files, 1MB for normal
+      maxBuffer: isLargeFile ? 50 * 1024 * 1024 : 5 * 1024 * 1024, // 50MB for large files, 5MB for normal
     });
 
     if (stdout && stdout.trim()) {
@@ -477,7 +639,7 @@ async function executeStrategy(
 /**
  * Detect available command line tools
  */
-async function detectAvailableTools(): Promise<void> {
+export async function detectAvailableTools(): Promise<void> {
   if (global.availableTools) {
     return; // Already detected
   }
@@ -485,6 +647,45 @@ async function detectAvailableTools(): Promise<void> {
   global.availableTools = new Map<string, ToolInfo>();
 
   const tools: ToolInfo[] = [
+    {
+      name: "gunzip",
+      command: "gunzip",
+      args: ["-c", "FILEPATH"],
+      description: "Decompress gzipped files",
+      priority: 8,
+      validation: (output: string) => {
+        const content = output
+          .replace(/Decompress gzipped files:\s*/i, "")
+          .trim();
+        return content.length > 10 && /[a-zA-Z]/.test(content);
+      },
+    },
+    {
+      name: "cat",
+      command: "cat",
+      args: ["FILEPATH"],
+      description: "Plain text file content",
+      priority: 7,
+      validation: (output: string) => {
+        const content = output
+          .replace(/Plain text file content:\s*/i, "")
+          .trim();
+        return content.length > 10 && /[a-zA-Z]/.test(content);
+      },
+    },
+    {
+      name: "head",
+      command: "head",
+      args: ["-c", "10000", "FILEPATH"],
+      description: "Preview file content (first 10KB)",
+      priority: 6,
+      validation: (output: string) => {
+        const content = output
+          .replace(/Preview file content \(first 10KB\):\s*/i, "")
+          .trim();
+        return content.length > 50 && /[a-zA-Z]/.test(content);
+      },
+    },
     {
       name: "pdftotext",
       command: "pdftotext",
@@ -607,21 +808,15 @@ async function detectAvailableTools(): Promise<void> {
     {
       name: "strings",
       command: "strings",
-      args: ["FILEPATH"],
+      args: ["-n", "4", "FILEPATH"], // Only strings with 4+ characters
       description: "Extract readable strings from binary files",
       priority: 3,
       validation: (output: string) => {
         const stringsContent = output
           .replace(/Extract readable strings from binary files:\s*/i, "")
           .trim();
-        const words = stringsContent
-          .split(/\s+/)
-          .filter((word) => word.length > 2);
-        return (
-          stringsContent.length > 50 &&
-          words.length > 5 &&
-          /[a-zA-Z]/.test(stringsContent)
-        );
+        // For binary files, be more lenient - just require some content and some letters
+        return stringsContent.length > 10 && /[a-zA-Z]/.test(stringsContent);
       },
     },
     {
@@ -653,7 +848,7 @@ async function detectAvailableTools(): Promise<void> {
 /**
  * Display file type information using the `file` command
  */
-async function displayFileType(filePath: string): Promise<void> {
+export async function displayFileType(filePath: string): Promise<void> {
   try {
     const { stdout } = await execAsync(`file "${filePath}"`);
     const fileType = stdout.trim().split(":")[1]?.trim() || "Unknown";
@@ -705,7 +900,7 @@ async function displayImageInfo(filePath: string): Promise<void> {
 /**
  * Check if a file extension suggests it's a text file
  */
-function isTextFile(ext: string): boolean {
+export function isTextFile(ext: string): boolean {
   const textExtensions = [
     ".txt",
     ".md",
@@ -763,7 +958,7 @@ function isTextFile(ext: string): boolean {
 /**
  * Check if a file extension suggests it's an image file
  */
-function isImageFile(ext: string): boolean {
+export function isImageFile(ext: string): boolean {
   const imageExtensions = [
     ".jpg",
     ".jpeg",
@@ -779,13 +974,13 @@ function isImageFile(ext: string): boolean {
     ".heic",
     ".heif",
   ];
-  return imageExtensions.includes(ext);
+  return imageExtensions.includes(ext.toLowerCase());
 }
 
 /**
  * Check if a file extension suggests it's an audio file
  */
-function isAudioFile(ext: string): boolean {
+export function isAudioFile(ext: string): boolean {
   const audioExtensions = [
     ".mp3",
     ".wav",
@@ -798,13 +993,13 @@ function isAudioFile(ext: string): boolean {
     ".aiff",
     ".alac",
   ];
-  return audioExtensions.includes(ext);
+  return audioExtensions.includes(ext.toLowerCase());
 }
 
 /**
  * Check if a file extension suggests it's a video file
  */
-function isVideoFile(ext: string): boolean {
+export function isVideoFile(ext: string): boolean {
   const videoExtensions = [
     ".mp4",
     ".avi",
@@ -817,13 +1012,13 @@ function isVideoFile(ext: string): boolean {
     ".3gp",
     ".ogv",
   ];
-  return videoExtensions.includes(ext);
+  return videoExtensions.includes(ext.toLowerCase());
 }
 
 /**
  * Check if a file extension suggests it's an archive file
  */
-function isArchiveFile(ext: string): boolean {
+export function isArchiveFile(ext: string): boolean {
   const archiveExtensions = [
     ".zip",
     ".rar",
@@ -835,13 +1030,13 @@ function isArchiveFile(ext: string): boolean {
     ".bz2",
     ".xz",
   ];
-  return archiveExtensions.includes(ext);
+  return archiveExtensions.includes(ext.toLowerCase());
 }
 
 /**
  * Check if a file extension suggests it's an office file
  */
-function isOfficeFile(ext: string): boolean {
+export function isOfficeFile(ext: string): boolean {
   const officeExtensions = [
     ".doc",
     ".docx",
@@ -865,7 +1060,7 @@ function isOfficeFile(ext: string): boolean {
     ".wq3",
     ".wq4",
   ];
-  return officeExtensions.includes(ext);
+  return officeExtensions.includes(ext.toLowerCase());
 }
 
 /**

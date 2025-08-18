@@ -11,6 +11,11 @@ import {
   FileItem,
 } from "./clustering.js";
 import { EmbeddingService } from "./embeddings.js";
+import {
+  detectAvailableTools,
+  generateFileInfoText,
+  generateFileInfoTextForDisplay,
+} from "./fileinfo.js";
 import { triageClusters } from "./interactive.js";
 
 async function processDirectory(
@@ -52,11 +57,16 @@ async function processDirectory(
   let errorCount = 0;
 
   try {
-    spinner.text = `Getting embeddings for ${validFiles.length} files...`;
+    spinner.text = `Getting embeddings for 0/${validFiles.length} files...`;
 
     // Use the batch method with concurrency limits instead of individual calls
     const filePaths = validFiles.map((f) => f.filePath);
-    const results = await embeddingService.getFileEmbeddings(filePaths);
+    const results = await embeddingService.getFileEmbeddings(
+      filePaths,
+      (current, total) => {
+        spinner.text = `Getting embeddings for ${current}/${total} files...`;
+      },
+    );
 
     // Process the batch results
     for (let i = 0; i < results.length; i++) {
@@ -108,6 +118,84 @@ async function processDirectory(
   return fileItems;
 }
 
+async function getFileInfo(
+  filePath: string,
+  embeddingService: EmbeddingService,
+): Promise<void> {
+  console.log(
+    chalk.blue.bold(`\n=== File Information: ${path.basename(filePath)} ===`),
+  );
+
+  try {
+    // Check if file exists
+    const stats = await fs.stat(filePath);
+    if (stats.isDirectory()) {
+      console.error(chalk.red(`Error: ${filePath} is a directory, not a file`));
+      return;
+    }
+
+    // Display basic file info
+    console.log(chalk.white(`File: ${path.basename(filePath)}`));
+    console.log(chalk.gray(`Path: ${filePath}`));
+    console.log(chalk.green(`Size: ${(stats.size / 1024).toFixed(2)} KB`));
+    console.log(chalk.green(`Modified: ${stats.mtime.toLocaleString()}`));
+
+    // Check cache status
+    console.log(chalk.blue("\n--- Cache Status ---"));
+    const cachedResult = await embeddingService.getCachedEmbeddingInfo(
+      filePath,
+    );
+    if (cachedResult) {
+      console.log(chalk.green("✓ File is cached"));
+      console.log(chalk.gray(`Strategy used: ${cachedResult.strategy}`));
+
+      // Get cache details from the database
+      const cacheStats = await embeddingService.getCacheStats();
+      if (cacheStats) {
+        console.log(
+          chalk.gray(`Cache location: ${path.dirname(filePath)}/.triage.db`),
+        );
+      }
+    } else {
+      console.log(chalk.yellow("✗ File is not cached"));
+    }
+
+    // Show what text would be embedded
+    console.log(chalk.blue("\n--- Text for Embedding ---"));
+    try {
+      const embeddingText = await generateFileInfoText(filePath);
+
+      // Show a preview of the text (first 500 characters)
+      const preview =
+        embeddingText.length > 500
+          ? embeddingText.substring(0, 500) + "\n... (truncated for display)"
+          : embeddingText;
+
+      console.log(chalk.gray(preview));
+      console.log(
+        chalk.cyan(`\nTotal length: ${embeddingText.length} characters`),
+      );
+
+      // Estimate token count
+      const estimatedTokens = Math.ceil(embeddingText.length / 4);
+      console.log(chalk.cyan(`Estimated tokens: ~${estimatedTokens}`));
+    } catch (error) {
+      console.log(chalk.red(`Error generating embedding text: ${error}`));
+    }
+
+    // Show what would be displayed to user
+    console.log(chalk.blue("\n--- Text for User Display ---"));
+    try {
+      const displayText = await generateFileInfoTextForDisplay(filePath);
+      console.log(chalk.gray(displayText));
+    } catch (error) {
+      console.log(chalk.red(`Error generating display text: ${error}`));
+    }
+  } catch (error) {
+    console.error(chalk.red(`Error getting file info: ${error}`));
+  }
+}
+
 async function main() {
   program
     .name("file-triage")
@@ -115,10 +203,14 @@ async function main() {
       "CLI tool for triaging files using embeddings and auto-clustering with database cache (auto-clustering always enabled, fast cache by default)",
     )
     .version("1.0.0")
-    .argument("<directories...>", "directories to process")
+    .argument("[directories...]", "directories to process")
     .option(
       "-k, --openai-key <key>",
       "OpenAI API key (or set OPENAI_API_KEY env var)",
+    )
+    .option(
+      "-f, --file-info <file>",
+      "show detailed information about a specific file including cache status and embedding text",
     )
     .option("-c, --min-cluster-size <size>", "minimum cluster size", "2")
     .option(
@@ -152,6 +244,39 @@ async function main() {
 
         // Create embedding service
         const embeddingService = new EmbeddingService(apiKey, false); // verboseTools always false
+
+        // Initialize available tools before processing any files
+        await detectAvailableTools();
+
+        // Handle file-info option
+        if (options.fileInfo) {
+          const filePath = path.resolve(options.fileInfo);
+
+          // Check if file exists
+          try {
+            await fs.access(filePath);
+          } catch (error) {
+            console.error(
+              chalk.red(
+                `Error: File ${options.fileInfo} does not exist or is not accessible`,
+              ),
+            );
+            process.exit(1);
+          }
+
+          // Initialize cache for the file's directory
+          const fileDir = path.dirname(filePath);
+          await embeddingService.initializeCache(
+            fileDir,
+            options.strictCache !== true,
+          );
+
+          // Get and display file info
+          await getFileInfo(filePath, embeddingService);
+
+          await embeddingService.closeCache();
+          return;
+        }
 
         // Handle cache stats option
         if (options.cacheStats) {
@@ -220,6 +345,16 @@ async function main() {
 
           await embeddingService.closeCache();
           return;
+        }
+
+        // Validate that directories are provided for main operation
+        if (directories.length === 0) {
+          console.error(
+            chalk.red(
+              "Error: Please specify directories to process or use --file-info to examine a specific file",
+            ),
+          );
+          process.exit(1);
         }
 
         // Validate directories
