@@ -37,8 +37,6 @@ npm start ~/Downloads ~/Documents
 
 - `-k, --openai-key <key>`: OpenAI API key (alternative to environment variable)
 - `-c, --min-cluster-size <size>`: Minimum cluster size (default: 2)
-- `--similarity-threshold <threshold>`: Similarity threshold for preprocessing (0-1, default: 0.95)
-- `--max-cluster-size <size>`: Maximum files per cluster (default: 50)
 - `--auto-cluster`: Automatically adjust clustering parameters for optimal results
 - `--target-clusters <count>`: Target number of clusters for auto-clustering
 - `--verbose-clustering`: Show detailed auto-clustering information
@@ -65,8 +63,6 @@ For each file in each cluster, you can:
 
 #### **Manual Clustering**
 
-- **Similarity Threshold**: Control how similar files must be to group together (0.95 = very similar, 0.85 = more diverse)
-- **Max Cluster Size**: Limit the maximum number of files in any single cluster
 - **Min Cluster Size**: Prevent tiny clusters from forming
 
 #### **Auto-Clustering (Recommended)**

@@ -87,7 +87,7 @@ File Triage processes directories of files by:
 
 **Key Features:**
 
-- **Similarity Threshold Control**: Adjust how similar files must be to group together
+- **Cluster Size Control**: Adjust minimum and maximum cluster sizes for optimal grouping
 - **Max Cluster Size Limiting**: Prevent any single cluster from dominating the dataset
 - **Quality-Based Stopping**: Stop auto-clustering when quality score >0.8
 - **Smart Parameter Adjustment**: Apply best practices automatically based on results
@@ -164,8 +164,6 @@ file-triage <directories...> [options]
 
 - `-k, --openai-key <key>`: OpenAI API key
 - `-c, --min-cluster-size <size>`: Minimum cluster size (default: 2)
-- `--similarity-threshold <threshold>`: Similarity threshold for clustering (0-1, default: 0.95)
-- `--max-cluster-size <size>`: Maximum files per cluster (default: 50)
 - `--auto-cluster`: Automatically adjust clustering parameters for optimal results
 - `--target-clusters <count>`: Target number of clusters for auto-clustering
 - `--verbose-clustering`: Show detailed auto-clustering information
@@ -191,7 +189,7 @@ file-triage --auto-cluster ./documents
 file-triage --auto-cluster --target-clusters 50 ./documents
 
 # Manual clustering with custom parameters
-file-triage --similarity-threshold 0.90 --max-cluster-size 25 ./documents
+file-triage -c 3 ./documents
 
 # Disable progress indicators
 file-triage --no-progress ./documents
@@ -298,12 +296,12 @@ embeddingService.registerCustomTool({
 
 ### Clustering Parameters
 
-- **Basic Parameters**: Adjust `min-cluster-size`, `similarity-threshold`, and `max-cluster-size`
+- **Basic Parameters**: Adjust `min-cluster-size`
 - **Auto-Clustering**: Let the system automatically optimize parameters based on results
 - **Quality Scoring**: System evaluates clustering quality and stops when optimal
 - **Preprocessing**: Automatic filtering of very similar files to prevent giant clusters
 - **HDBSCAN Tuning**: Modify algorithm parameters for different clustering behaviors
-- **Custom Similarity**: Implement custom similarity metrics beyond cosine similarity
+- **Custom Clustering**: Implement custom clustering algorithms beyond HDBSCAN
 
 ## Use Cases
 
@@ -331,8 +329,8 @@ The auto-clustering system applies intelligent rules to optimize clustering para
 ### **Rule 1: Giant Cluster Detection**
 
 - **Trigger**: Any cluster >30% of total files
-- **Action**: Reduce `max-cluster-size` by 30-50%
-- **Action**: Reduce `similarity-threshold` by 0.05-0.10
+- **Action**: Increase `min-cluster-size` by 1-2
+- **Action**: Increase `min-cluster-size` by 1-2
 
 ### **Rule 2: Small Cluster Detection**
 
@@ -342,7 +340,7 @@ The auto-clustering system applies intelligent rules to optimize clustering para
 ### **Rule 3: Target Cluster Adjustment**
 
 - **Trigger**: User specified `--target-clusters`
-- **Action**: Adjust `similarity-threshold` based on current vs. target ratio
+- **Action**: Adjust `min-cluster-size` based on current vs. target ratio
 
 ### **Rule 4: Quality Threshold**
 

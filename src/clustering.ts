@@ -16,14 +16,11 @@ export interface Cluster {
 export interface ClusteringOptions {
   minClusterSize?: number;
   minSamples?: number;
-  similarityThreshold?: number; // Cosine similarity threshold (0-1)
-  maxClusterSize?: number; // Maximum files per cluster
 }
 
 export interface AutoClusteringOptions {
   maxIterations?: number;
   targetClusterCount?: number; // Target number of clusters (optional)
-  maxClusterSizePercent?: number; // Max cluster size as % of total files
   minClusterSizePercent?: number; // Min cluster size as % of total files
   enableVerbose?: boolean; // Show detailed auto-adjustment info
 }
@@ -67,12 +64,7 @@ export async function clusterFiles(
   const opts: ClusteringOptions =
     typeof options === "number" ? { minClusterSize: options } : options;
 
-  const {
-    minClusterSize = 2,
-    minSamples = Math.min(minClusterSize, 3),
-    similarityThreshold = 0.95,
-    maxClusterSize = 50,
-  } = opts;
+  const { minClusterSize = 2, minSamples = Math.min(minClusterSize, 3) } = opts;
 
   if (files.length < minClusterSize) {
     // If we have fewer files than minimum cluster size, put them all in one cluster
@@ -91,6 +83,7 @@ export async function clusterFiles(
   const hdbscan = new HDBSCAN({
     minClusterSize: minClusterSize,
     minSamples: minSamples,
+
     // Add more HDBSCAN parameters if the library supports them
   });
 
@@ -216,14 +209,14 @@ export function analyzeClusteringResults(clusters: Cluster[]): {
   if (sizeDistribution["100+"] > 0) {
     suggestions.push(
       `Found ${sizeDistribution["100+"]} very large clusters (>100 files). ` +
-        `Consider reducing --similarity-threshold from 0.95 to 0.90 or 0.85.`,
+        `Consider increasing --min-cluster-size from 2 to 4 or 5.`,
     );
   }
 
   if (sizeDistribution["51-100"] > 0) {
     suggestions.push(
       `Found ${sizeDistribution["51-100"]} large clusters (51-100 files). ` +
-        `Consider reducing --max-cluster-size from 50 to 25.`,
+        `Consider increasing --min-cluster-size from 2 to 3 or 4.`,
     );
   }
 
@@ -237,7 +230,7 @@ export function analyzeClusteringResults(clusters: Cluster[]): {
   if (totalClusters > totalFiles * 0.3) {
     suggestions.push(
       `Very high number of clusters relative to files. ` +
-        `Consider increasing --similarity-threshold from 0.95 to 0.97.`,
+        `Consider increasing --min-cluster-size from 2 to 3 or 4.`,
     );
   }
 
@@ -266,7 +259,6 @@ export async function autoClusterFiles(
   const {
     maxIterations = 5, // Increased from 3 to 5 for more refinement
     targetClusterCount,
-    maxClusterSizePercent = 0.15, // Increased from 0.05 to 0.15 for more realistic limits
     minClusterSizePercent = 0.02, // 2% of total files
     enableVerbose = false,
   } = autoOptions;
@@ -274,20 +266,8 @@ export async function autoClusterFiles(
   const totalFiles = files.length;
   let currentOptions: ClusteringOptions = {
     minClusterSize: 2,
-    similarityThreshold: 0.92, // Start with slightly lower threshold for better initial clustering
-    maxClusterSize: 30, // Start with moderate size limit
     ...initialOptions,
   };
-
-  // Apply a hard cap on maxClusterSize based on the percentage limit
-  const hardMaxClusterSize = Math.max(
-    30, // Increased minimum from 20 to 30
-    Math.floor(totalFiles * maxClusterSizePercent),
-  );
-  currentOptions.maxClusterSize = Math.min(
-    currentOptions.maxClusterSize || 30,
-    hardMaxClusterSize,
-  );
 
   const adjustments: string[] = [];
   let bestClusters: Cluster[] = [];
@@ -296,11 +276,7 @@ export async function autoClusterFiles(
 
   if (enableVerbose) {
     console.log(`🔄 Auto-clustering: Starting with ${totalFiles} files`);
-    console.log(
-      `📊 Target: Balanced clusters with max ${Math.round(
-        maxClusterSizePercent * 100,
-      )}% per cluster (hard cap: ${hardMaxClusterSize} files)`,
-    );
+    console.log(`📊 Target: Balanced clusters with optimal min-cluster-size`);
   }
 
   for (let iteration = 1; iteration <= maxIterations; iteration++) {
@@ -387,7 +363,6 @@ export async function autoClusterFiles(
       currentOptions,
       analysis,
       totalFiles,
-      maxClusterSizePercent,
       minClusterSizePercent,
       targetClusterCount,
     );
@@ -528,30 +503,11 @@ function adjustClusteringParameters(
   currentOptions: ClusteringOptions,
   analysis: ReturnType<typeof analyzeClusteringResults>,
   totalFiles: number,
-  maxClusterSizePercent: number,
   minClusterSizePercent: number,
   targetClusterCount?: number,
 ): ClusteringOptions {
   const newOptions = { ...currentOptions };
   const { totalClusters, sizeDistribution, clusterSizes } = analysis;
-
-  // Rule 1: Smart handling of large clusters - adjust similarity threshold more intelligently
-  const maxClusterSize = Math.max(...clusterSizes);
-  const maxClusterPercent = maxClusterSize / totalFiles;
-
-  if (maxClusterPercent > maxClusterSizePercent) {
-    // Large cluster detected - use adaptive threshold adjustment
-    const thresholdReduction = Math.min(0.15, maxClusterPercent * 0.3); // Adaptive reduction
-    if (newOptions.similarityThreshold) {
-      newOptions.similarityThreshold = Math.max(
-        0.75, // Lower minimum threshold for better clustering
-        newOptions.similarityThreshold - thresholdReduction,
-      );
-    }
-
-    // Don't aggressively reduce maxClusterSize - let the similarity threshold do the work
-    // This prevents creating too many small, noisy clusters
-  }
 
   // Rule 2: Adjust min cluster size based on overall file count and cluster distribution
   const smallClusterCount = sizeDistribution["1-5"] + sizeDistribution["6-10"];
@@ -571,44 +527,22 @@ function adjustClusteringParameters(
     );
   }
 
-  // Rule 3: Smart similarity threshold adjustment based on cluster count and target
+  // Rule 3: Smart minClusterSize adjustment based on cluster count and target
   if (targetClusterCount) {
     const currentRatio = totalClusters / totalFiles;
     const targetRatio = targetClusterCount / totalFiles;
 
     if (currentRatio > targetRatio * 1.3) {
-      // Too many clusters, increase similarity threshold gradually
-      newOptions.similarityThreshold = Math.min(
-        0.98,
-        (newOptions.similarityThreshold || 0.92) + 0.015, // Reduced from 0.02 to 0.015
+      // Too many clusters, increase minClusterSize to reduce cluster count
+      newOptions.minClusterSize = Math.min(
+        10, // Maximum reasonable minClusterSize
+        (newOptions.minClusterSize || 2) + 1,
       );
     } else if (currentRatio < targetRatio * 0.7) {
-      // Too few clusters, decrease similarity threshold more aggressively
-      newOptions.similarityThreshold = Math.max(
-        0.75, // Lowered from 0.8 to 0.75
-        (newOptions.similarityThreshold || 0.92) - 0.025, // Increased from 0.03 to 0.025
-      );
-    }
-  }
-
-  // Rule 4: Adaptive max cluster size adjustment based on dataset characteristics
-  const largeClusterCount =
-    sizeDistribution["51-100"] + sizeDistribution["100+"];
-  if (largeClusterCount > 0 && newOptions.maxClusterSize) {
-    const avgClusterSize = totalFiles / totalClusters;
-    const currentMaxSize = newOptions.maxClusterSize;
-
-    if (avgClusterSize > currentMaxSize * 0.7) {
-      // Clusters are consistently large - increase max size gradually
-      newOptions.maxClusterSize = Math.min(
-        Math.floor(totalFiles * 0.25), // Cap at 25% of total files
-        Math.floor(currentMaxSize * 1.1), // Increase by 10%
-      );
-    } else if (avgClusterSize < currentMaxSize * 0.3 && totalClusters > 20) {
-      // Clusters are too small and we have many - decrease max size
-      newOptions.maxClusterSize = Math.max(
-        15, // Minimum reasonable size
-        Math.floor(currentMaxSize * 0.9), // Decrease by 10%
+      // Too few clusters, decrease minClusterSize to increase cluster count
+      newOptions.minClusterSize = Math.max(
+        2, // Minimum reasonable minClusterSize
+        (newOptions.minClusterSize || 2) - 1,
       );
     }
   }
@@ -618,20 +552,18 @@ function adjustClusteringParameters(
 
   if (clusterCountRatio < 0.005 && totalFiles > 500) {
     // Very few clusters in large dataset - likely under-clustering
-    if (newOptions.similarityThreshold) {
-      newOptions.similarityThreshold = Math.max(
-        0.7, // Lower threshold to encourage more clusters
-        newOptions.similarityThreshold - 0.05,
-      );
-    }
+    // Reduce minClusterSize to encourage more clusters
+    newOptions.minClusterSize = Math.max(
+      2,
+      (newOptions.minClusterSize || 2) - 1,
+    );
   } else if (clusterCountRatio > 0.15 && totalFiles > 200) {
     // Too many clusters in large dataset - likely over-clustering
-    if (newOptions.similarityThreshold) {
-      newOptions.similarityThreshold = Math.min(
-        0.98,
-        newOptions.similarityThreshold + 0.03,
-      );
-    }
+    // Increase minClusterSize to reduce cluster count
+    newOptions.minClusterSize = Math.min(
+      8,
+      (newOptions.minClusterSize || 2) + 1,
+    );
   }
 
   return newOptions;
@@ -649,18 +581,6 @@ function describeParameterChanges(
   if (oldOptions.minClusterSize !== newOptions.minClusterSize) {
     changes.push(
       `min-cluster-size: ${oldOptions.minClusterSize} → ${newOptions.minClusterSize}`,
-    );
-  }
-
-  if (oldOptions.similarityThreshold !== newOptions.similarityThreshold) {
-    changes.push(
-      `similarity-threshold: ${oldOptions.similarityThreshold} → ${newOptions.similarityThreshold}`,
-    );
-  }
-
-  if (oldOptions.maxClusterSize !== newOptions.maxClusterSize) {
-    changes.push(
-      `max-cluster-size: ${oldOptions.maxClusterSize} → ${newOptions.maxClusterSize}`,
     );
   }
 

@@ -214,12 +214,6 @@ async function main() {
     )
     .option("-c, --min-cluster-size <size>", "minimum cluster size", "2")
     .option(
-      "--similarity-threshold <threshold>",
-      "similarity threshold for clustering (0-1)",
-      "0.95",
-    )
-    .option("--max-cluster-size <size>", "maximum files per cluster", "50")
-    .option(
       "--target-clusters <count>",
       "target number of clusters for auto-clustering (optional)",
     )
@@ -382,8 +376,6 @@ async function main() {
           chalk.gray(
             `Processing ${directories.length} directories with clustering parameters:\n` +
               `  - Minimum cluster size: ${options.minClusterSize}\n` +
-              `  - Similarity threshold: ${options.similarityThreshold}\n` +
-              `  - Maximum cluster size: ${options.maxClusterSize}\n` +
               `  - Auto-clustering: enabled\n` +
               (targetClusters
                 ? `  - Target clusters: ${targetClusters}\n`
@@ -460,15 +452,10 @@ async function main() {
           allFiles,
           {
             minClusterSize: parseInt(options.minClusterSize),
-            similarityThreshold: parseFloat(
-              options.similarityThreshold || "0.95",
-            ),
-            maxClusterSize: parseInt(options.maxClusterSize || "50"),
           },
           {
             targetClusterCount: targetClusters,
             enableVerbose: true, // Enable verbose output for better insights
-            maxClusterSizePercent: 0.15, // Increased from 0.1 to 0.15 for more realistic limits
           },
         );
 
