@@ -1,4 +1,4 @@
-import { HDBSCAN } from "hdbscan-ts";
+import { HDBSCAN } from "./hdbscan";
 
 export interface FileItem {
   filePath: string;
@@ -83,7 +83,7 @@ export async function clusterFiles(
   const hdbscan = new HDBSCAN({
     minClusterSize: minClusterSize,
     minSamples: minSamples,
-
+    metric: "cosine",
     // Add more HDBSCAN parameters if the library supports them
   });
 
