@@ -711,21 +711,21 @@ export async function detectAvailableTools(): Promise<void> {
       command: "identify",
       args: ["-verbose", "FILEPATH"],
       description: "ImageMagick image information",
-      priority: 1,
+      priority: 7,
     },
     {
       name: "gm-identify",
       command: "gm",
       args: ["identify", "-verbose", "FILEPATH"],
       description: "GraphicsMagick image information",
-      priority: 1,
+      priority: 7,
     },
     {
       name: "exiftool",
       command: "exiftool",
       args: ["FILEPATH"],
       description: "File metadata extraction",
-      priority: 1,
+      priority: 6,
     },
     {
       name: "ffprobe",
@@ -810,7 +810,7 @@ export async function detectAvailableTools(): Promise<void> {
       command: "strings",
       args: ["-n", "4", "FILEPATH"], // Only strings with 4+ characters
       description: "Extract readable strings from binary files",
-      priority: 3,
+      priority: 0,
       validation: (output: string) => {
         const stringsContent = output
           .replace(/Extract readable strings from binary files:\s*/i, "")
