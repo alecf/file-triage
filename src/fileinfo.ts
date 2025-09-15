@@ -85,12 +85,52 @@ function truncateToTokenLimit(
   };
 }
 
+/**
+ * Declarative description of a CLI-based extraction strategy.
+ *
+ * Strategies are picked in `getStrategiesForFile` and executed by
+ * `executeStrategy`. Output is prefixed with the tool's `description`
+ * and may be truncated to fit token limits.
+ *
+ * Priority semantics:
+ * - Higher numbers indicate higher priority and are tried earlier.
+ * - A value of 0 effectively makes the tool a last-resort.
+ * - If omitted, the strategy is treated as priority 1 during sorting.
+ *
+ * Validation semantics:
+ * - If provided, the function receives the truncated output string, which
+ *   includes the `description` prefix followed by a colon (e.g.,
+ *   "Description:\n<tool output>"). Return true to accept, false to
+ *   discard and fall back to the next strategy.
+ *
+ * Args semantics:
+ * - Use the literal token "FILEPATH" to indicate where the absolute file
+ *   path should be injected prior to execution.
+ */
 interface ToolInfo {
+  /** Unique tool identifier used as the strategy name. */
   name: string;
+  /** The CLI executable to run (looked up via `command -v`). */
   command: string;
+  /**
+   * Command-line arguments. Use the literal token "FILEPATH" to have the
+   * absolute file path substituted at runtime.
+   */
   args: string[];
+  /**
+   * Human-readable label prepended to the tool's output. This is included
+   * in the content passed to `validation` and in the final displayed text.
+   */
   description: string;
+  /**
+   * Optional post-run check for tool output. Receives the truncated output
+   * string (including the `description` prefix). Return true to accept.
+   */
   validation?: (output: string) => boolean;
+  /**
+   * Strategy priority: higher values run earlier. If omitted, defaults to 1.
+   * Use 0 to explicitly de-prioritize as a last-resort.
+   */
   priority?: number;
 }
 
